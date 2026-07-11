@@ -28,12 +28,26 @@ from .schema import (
 )
 
 
+# The checks that ARE the answer: a scenario's mode-defining verdicts.
+# Design scenarios are solved by their decision slots; infeasible ones by the
+# conflict set + relaxation; clarify ones by the missing-info set.
+SOLUTION_CHECKS = frozenset(
+    {"slot_match", "conflicting_constraints", "relaxation", "missing_info"}
+)
+
+
 class ItemResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     gold_id: str
     dimension: Dimension
+    check: str = ""
+    weight: float = 1.0
     passed: bool
     detail: str
+
+    @property
+    def is_solution_check(self) -> bool:
+        return self.check in SOLUTION_CHECKS
 
 
 class ScenarioResult(BaseModel):
@@ -123,7 +137,8 @@ def grade_spec(scenario: Scenario, spec: DesignSpec | None) -> ScenarioResult:
             actual_mode=None,
             mode_correct=False,
             items=[
-                ItemResult(gold_id=g.id, dimension=g.dimension, passed=False,
+                ItemResult(gold_id=g.id, dimension=g.dimension, check=g.check,
+                           weight=g.weight, passed=False,
                            detail="no valid design spec submitted")
                 for g in scenario.gold
             ],
@@ -134,12 +149,14 @@ def grade_spec(scenario: Scenario, spec: DesignSpec | None) -> ScenarioResult:
     for gold in scenario.gold:
         if not mode_correct:
             items.append(ItemResult(
-                gold_id=gold.id, dimension=gold.dimension, passed=False,
+                gold_id=gold.id, dimension=gold.dimension, check=gold.check,
+                weight=gold.weight, passed=False,
                 detail=f"mode mismatch: submitted '{spec.mode.value}', expected '{scenario.expected_mode.value}'",
             ))
             continue
         passed, detail = _check_item(gold, spec)
-        items.append(ItemResult(gold_id=gold.id, dimension=gold.dimension, passed=passed, detail=detail))
+        items.append(ItemResult(gold_id=gold.id, dimension=gold.dimension, check=gold.check,
+                                weight=gold.weight, passed=passed, detail=detail))
 
     return ScenarioResult(
         instance_id=scenario.instance_id,

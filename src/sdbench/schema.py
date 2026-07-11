@@ -196,6 +196,7 @@ class _GoldBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str
     dimension: Dimension
+    weight: float = Field(default=1.0, gt=0)
 
 
 class PatternRequired(_GoldBase):
