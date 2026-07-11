@@ -104,19 +104,33 @@ def _anthropic_complete(model_id: str, reasoning: str | None) -> CompleteFn:
     def complete(messages: list[dict]) -> Completion:
         kwargs: dict = {}
         if reasoning:
-            kwargs["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": ANTHROPIC_THINKING_BUDGETS[reasoning],
-            }
-            # extended thinking requires default temperature
+            # Claude 5 family / Opus 4.8+: adaptive thinking with effort control.
+            kwargs["thinking"] = {"type": "adaptive"}
+            kwargs["extra_body"] = {"output_config": {"effort": reasoning}}
+            # thinking requires default temperature
         else:
             kwargs["temperature"] = 0.0
-        response = client.messages.create(
-            model=model_id,
-            max_tokens=MAX_OUTPUT_TOKENS,
-            messages=messages,
-            **kwargs,
-        )
+        try:
+            response = client.messages.create(
+                model=model_id,
+                max_tokens=MAX_OUTPUT_TOKENS,
+                messages=messages,
+                **kwargs,
+            )
+        except anthropic.BadRequestError as exc:
+            # Older Anthropic models predate adaptive thinking and want the
+            # budget-based form instead.
+            if not reasoning or "adaptive" not in str(exc):
+                raise
+            response = client.messages.create(
+                model=model_id,
+                max_tokens=MAX_OUTPUT_TOKENS,
+                messages=messages,
+                thinking={
+                    "type": "enabled",
+                    "budget_tokens": ANTHROPIC_THINKING_BUDGETS[reasoning],
+                },
+            )
         text = "".join(b.text for b in response.content if b.type == "text")
         usage = Usage(
             prompt_tokens=response.usage.input_tokens,
