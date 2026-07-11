@@ -1,7 +1,7 @@
 # SysDesign-Bench component menu.
 # Version-pinned: capability claims are checked against the pinned major version's
 # documented properties. Additions are versioned and additive (see README: Contributing).
-version: "0.1.0"
+version: "0.2.0"
 components:
   # --- Databases ---
   - id: postgresql-16

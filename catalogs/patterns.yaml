@@ -2,8 +2,34 @@
 # One global catalog shown verbatim to the model in every scenario — per-scenario
 # hint leakage is impossible because the menu never changes. Additions are versioned
 # and additive, and must cite the documented property that makes them checkable.
-version: "0.1.0"
+version: "0.2.0"
 patterns:
+  # ============ storage-engine ============
+  - id: lsm-tree
+    name: LSM tree
+    category: storage-engine
+    description: Log-structured merge tree; sequential writes via memtable + immutable sorted runs; high write throughput, read amplification managed by compaction.
+  - id: b-tree-engine
+    name: B-tree engine
+    category: storage-engine
+    description: Update-in-place balanced tree; strong point-read/range behavior, random-write amplification under heavy insert load.
+  - id: columnar-segments
+    name: Columnar segments
+    category: storage-engine
+    description: Column-oriented immutable segments; high compression and fast scans, expensive point updates.
+  - id: inverted-index
+    name: Inverted index
+    category: storage-engine
+    description: Term -> posting-list index for text/tag search; size governed by vocabulary and posting compression.
+  - id: bloom-filters
+    name: Bloom filters
+    category: storage-engine
+    description: Probabilistic membership tests that skip storage reads for absent keys.
+  - id: compaction-strategy
+    name: Compaction strategy
+    category: storage-engine
+    description: Background merging of immutable runs/segments controlling read and space amplification.
+
   # ============ data ============
   - id: cache-aside
     name: Cache-aside
@@ -85,6 +111,10 @@ patterns:
     name: Append-only log
     category: data
     description: Sequential immutable writes as the primary storage structure.
+  - id: crypto-shredding
+    name: Crypto-shredding
+    category: data
+    description: Per-subject encryption keys; deleting the key renders the subject's data in immutable storage unrecoverable, satisfying erasure without rewriting segments.
 
   # ============ migration ============
   - id: expand-contract
@@ -147,6 +177,10 @@ patterns:
     name: Bidirectional sync
     category: migration
     description: Changes propagate both ways between old and new stores while both accept writes.
+  - id: staged-rollout
+    name: Staged rollout with health gates
+    category: migration
+    description: Cohort-by-cohort rollout where each stage must pass health checks before the next begins, with automatic halt/rollback on regression.
 
   # ============ traffic ============
   - id: queue-load-leveling
@@ -279,6 +313,10 @@ patterns:
     name: Reliable multicast with gap-fill
     category: realtime
     description: One-to-many datagram distribution with sequence numbers and a recovery channel for gaps.
+  - id: presence-debouncing
+    name: Presence debouncing
+    category: realtime
+    description: Presence transitions held for a grace window so connectivity flaps collapse into one update instead of a broadcast per flap.
 
   # ============ reliability ============
   - id: idempotency-keys
@@ -341,6 +379,20 @@ patterns:
     name: Chaos testing
     category: reliability
     description: Deliberate fault injection in production-like conditions to verify resilience.
+  - id: checkpoint-resume
+    name: Checkpoint and resume
+    category: reliability
+    description: Long-running work persists progress markers so interrupted jobs continue from the last checkpoint instead of restarting.
+
+  # ============ embedded ============
+  - id: ab-partition-update
+    name: A/B partition update
+    category: embedded
+    description: Firmware flashed to the inactive partition and activated by an atomic switch; interrupted flashing never destroys the running image.
+  - id: watchdog-timer
+    name: Watchdog timer
+    category: embedded
+    description: Hardware timer that resets the device if firmware stops petting it; unattended recovery from hangs and bad states.
 
   # ============ performance ============
   - id: kernel-bypass-networking
@@ -381,6 +433,10 @@ patterns:
     name: Fail open
     category: degraded-info
     description: On uncertainty or failure, allow the action (availability over safety).
+  - id: fail-static
+    name: Fail static
+    category: degraded-info
+    description: When the configuration/control source is unavailable, keep operating on the last-known-good state rather than blocking or falling back to empty defaults.
   - id: crdt
     name: CRDTs
     category: degraded-info

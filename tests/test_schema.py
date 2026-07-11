@@ -11,7 +11,7 @@ from sdbench.schema import (
 
 class TestCatalogs:
     def test_catalogs_load(self, catalogs: Catalogs):
-        assert catalogs.version == "0.1.0"
+        assert catalogs.version == "0.2.0"
         assert len(catalogs.patterns) >= 80, "pattern catalog should be large enough that it leaks no hints"
         assert len(catalogs.components) >= 10
         assert len(catalogs.roles) >= 8

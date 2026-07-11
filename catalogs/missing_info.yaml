@@ -1,7 +1,7 @@
 # SysDesign-Bench missing-information taxonomy.
 # In clarify mode the model lists the keys it needs before it can design responsibly.
 # Graded as: gold-required keys ⊆ answer ⊆ gold-allowed keys.
-version: "0.1.0"
+version: "0.2.0"
 missing_info:
   - id: expected_read_qps
     name: Expected read throughput
