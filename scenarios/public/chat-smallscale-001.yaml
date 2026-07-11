@@ -1,0 +1,145 @@
+# Minimal pair with chat-presence-2m-001: the same chat surface at 1/1000th
+# the scale. Every big-chat reflex (Kafka, Cassandra, sharding, CQRS) is
+# scored over-engineering; one relational primary plus a WebSocket tier is
+# the entailed answer. Easy floor item for the parsimony dimension.
+instance_id: chat-smallscale-001
+domain: workplace-chat
+difficulty: easy
+version: "0.2.0"
+split: public
+
+problem_statement: |
+  A 2,000-employee company wants an internal chat tool (they are leaving a
+  discontinued product). Peak concurrency is about 1,200 connected clients.
+  Measured peak message rate on the old system: 50 messages/second, small
+  conversations (avg 4 recipients). Total history over five years is about
+  40 GB of text.
+
+  Requirements: messages are never lost once accepted; each conversation
+  shows a consistent order; full-text search over history; presence dots in
+  the sidebar. The tool is run by a 2-person internal IT dev team on two
+  on-prem VMs. Choose the architecture.
+
+context: |
+  Growth is bounded by headcount (~5%/year). No external users. The old
+  system's outages were caused by unattended complexity, which is why the
+  team insists on something they can operate themselves.
+
+constraints:
+  - id: C1
+    type: scale
+    value: "1,200 peak concurrent clients; 50 messages/second peak; 40 GB history over 5 years"
+  - id: C2
+    type: team
+    value: "2-person team, two on-prem VMs; the operability of the system by this team is an explicit requirement"
+  - id: C3
+    type: durability
+    value: "accepted messages are never lost; per-conversation consistent ordering"
+
+requirements:
+  - id: R1
+    text: Real-time message delivery with per-conversation ordering.
+  - id: R2
+    text: Full-text search over message history.
+  - id: R3
+    text: Presence indicators for connected users.
+  - id: R4
+    text: The 2-person team can operate the whole system.
+
+flows:
+  - id: delivery
+    description: Getting messages to connected clients.
+    decision_slots:
+      transport: [websocket-push, server-sent-events, long-polling, udp-custom-reliability]
+      durability_point: [durable-before-ack, best-effort-fanout]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: role_required
+    acceptable_roles: [system-of-record]
+    acceptable_components: [postgresql-16, mysql-8]
+  - id: g2
+    dimension: tradeoff_selection
+    check: role_forbidden
+    role: system-of-record
+    forbidden_components: [cassandra-4, redis-7, memcached]
+  - id: g3
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: delivery
+    slot: durability_point
+    acceptable: [durable-before-ack]
+  - id: g4
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: delivery
+    slot: transport
+    acceptable: [websocket-push, server-sent-events]
+  - id: g5
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [inverted-index, secondary-indexes]
+  - id: g6
+    dimension: operability
+    check: pattern_forbidden
+    forbidden: [sharding, cqrs, event-sourcing, autoscaling]
+  - id: g7
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 5
+
+traps:
+  - id: T1
+    description: The big-chat reference architecture — broker-backed fan-out, wide-column message store, sharded services.
+    violated_constraint_id: C2
+    why_attractive: Every published chat architecture is written for millions of users, so pattern-matching the problem type retrieves that stack. At 50 msgs/s and 40 GB, all of it is idle machinery the 2-person team must operate — which is the failure mode that made them leave the previous product.
+  - id: T2
+    description: Best-effort fan-out with async persistence "since chat feels ephemeral".
+    violated_constraint_id: C3
+    why_attractive: It simplifies the hot path and at this scale everything feels fast. But C3 says accepted messages are never lost — the durable write must precede the delivery ack, and at 50/s the cost of doing it right is negligible.
+  - id: T3
+    description: A dedicated search cluster for full-text search.
+    violated_constraint_id: C1
+    why_attractive: '"Full-text search" pattern-matches to a search engine deployment. But 40 GB of text is comfortably inside a relational database''s built-in full-text indexing, and a separate cluster doubles the operational surface for the 2-person team.'
+
+twist:
+  description: >
+    The identical problem surface as the 2M-user sibling scenario at 1/1000th
+    scale — the pair punishes answering the problem TYPE instead of the
+    problem NUMBERS.
+  invalidated_canonical: >
+    The published big-chat reference stack (broker fan-out, wide-column
+    storage, sharding, CQRS read models) fails g2/g6/g7 here: at 50
+    messages/second with a 2-person operations team, one relational primary
+    with built-in full-text search and a WebSocket tier is the entailed
+    architecture, and each additional moving part is a scored violation.
+  twist_gold_refs: [g2, g6]
+
+gold_rationale: |
+  Capacity math (g1, g2, g6, g7): 50 messages/second is ~0.5% of a single
+  relational primary's comfortable transactional write capacity; 40 GB over
+  five years fits in RAM on a modest VM. Nothing in the numbers creates a
+  second scaling problem, so every scale structure (sharding, brokers as
+  message backbone, CQRS, autoscaling on two fixed VMs) adds operational
+  surface (C2's explicit requirement) with zero capacity need. The failure
+  mode being designed against is stated in context: unattended complexity.
+
+  Durability (g3, T2): C3 requires accepted-means-durable; the write to the
+  primary precedes the ack, then fan-out to connected clients. At 50/s this
+  costs single-digit milliseconds — there is no throughput pressure to trade
+  against, so best-effort is a pure violation.
+
+  Search (g5, T3): built-in full-text indexing (e.g. the relational engine's
+  native FTS) over 40 GB satisfies R2 with one system; a separate search
+  cluster doubles what the 2-person team operates (C2) for capacity nobody
+  needs (C1).
+
+  Transport (g4): WebSocket push (or SSE with a small write channel) serves
+  1,200 concurrent connections from one VM; exotic transports solve latency
+  problems this scale does not have.

@@ -1,0 +1,180 @@
+# The stateless-JWT canon inverted by a revocation SLA. Contains a
+# numeric-entailment slot: the token lifetime is uniquely determined by two
+# independent computations (refresh capacity, denylist memory under mass
+# revocation) — guessing a plausible value fails.
+instance_id: session-revocation-001
+domain: auth-platform
+difficulty: hard
+version: "0.2.0"
+split: public
+
+problem_statement: |
+  A B2B SaaS platform authenticates ~2,000,000 concurrently active sessions.
+  API requests are validated at 30 API gateways worldwide. Today, auth uses
+  self-contained signed tokens with a 24-hour lifetime, validated locally at
+  the gateway with no further lookups.
+
+  After a security incident, the security office mandates: once a session is
+  revoked (user logout-everywhere, admin action, or compromise response), it
+  must be unusable at every gateway within 60 seconds, worldwide. This is
+  non-negotiable.
+
+  Hard operating facts:
+  - Token validation may add at most 5 ms p99 per request at the gateway.
+    Cross-region calls to the central auth service measure 20–80 ms RTT.
+  - The central auth service sustains at most 5,000 token issuance/refresh
+    requests per second (scaling it further is out of scope this quarter).
+  - The platform serves large enterprises: offboarding/divestiture events
+    revoke up to 5,000,000 sessions at once, and such events have occurred
+    on consecutive days.
+  - Each gateway can dedicate at most 400 MB of memory to revocation data.
+    A revocation entry costs ~64 bytes. The internal event feed that could
+    carry revocations to gateways delivers with p99 5 seconds.
+
+  Redesign session validation to meet the 60-second revocation mandate.
+
+context: |
+  Sessions are long-lived (users stay signed in for weeks via refresh).
+  Gateways are stateless today. The event feed supports per-consumer
+  heartbeats.
+
+constraints:
+  - id: C1
+    type: compliance
+    value: "revoked session unusable at every gateway within 60 seconds, worldwide"
+  - id: C2
+    type: latency
+    value: "token validation adds <= 5 ms p99 at the gateway; central auth RTT is 20-80 ms cross-region"
+  - id: C3
+    type: throughput
+    value: "central auth service sustains <= 5,000 issuance/refresh requests/second"
+  - id: C4
+    type: scale
+    value: "2M concurrent sessions; mass revocations up to 5M at once, possibly on consecutive days; gateway revocation memory <= 400 MB at ~64 bytes/entry; feed delivery p99 5s"
+
+requirements:
+  - id: R1
+    text: Revocation takes effect at all gateways within 60 seconds.
+  - id: R2
+    text: Request-path token validation stays within the 5 ms gateway budget.
+  - id: R3
+    text: Mass revocation events (5M sessions) are handled within gateway memory limits.
+  - id: R4
+    text: Gateways behave correctly when the revocation feed is delayed or partitioned.
+    implicit: true
+
+flows:
+  - id: revocation_mechanism
+    description: How revocation reaches enforcement.
+    decision_slots:
+      mechanism: [stateless-tokens-until-expiry, pure-short-lived-tokens-no-denylist, gateway-denylist-plus-bounded-token-lifetime]
+  - id: token_policy
+    description: Access-token lifetime (bounds both refresh load and how long denylist entries must be retained).
+    decision_slots:
+      access_token_lifetime: [60-seconds, 15-minutes, 24-hours]
+  - id: feed_partition
+    description: Gateway behavior when the revocation feed goes stale.
+    decision_slots:
+      policy: [continue-accepting-fail-open, reject-all-fail-closed, fallback-to-central-validation]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: revocation_mechanism
+    slot: mechanism
+    acceptable: [gateway-denylist-plus-bounded-token-lifetime]
+  - id: g2
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: token_policy
+    slot: access_token_lifetime
+    acceptable: [15-minutes]
+  - id: g3
+    dimension: operability
+    check: slot_match
+    flow: feed_partition
+    slot: policy
+    acceptable: [fallback-to-central-validation]
+  - id: g4
+    dimension: operability
+    check: pattern_required
+    acceptable: [heartbeat-timeout-detection]
+  - id: g5
+    dimension: operability
+    check: pattern_required
+    acceptable: [staleness-fallback]
+  - id: g6
+    dimension: tradeoff_selection
+    check: pattern_required
+    acceptable: [ttl-expiry]
+  - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
+    acceptable: [heartbeat-timeout-detection, staleness-fallback]
+  - id: g8
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 7
+
+traps:
+  - id: T1
+    description: Keep 24-hour self-contained tokens; handle compromise "at the application layer later".
+    violated_constraint_id: C1
+    why_attractive: Statelessness is the celebrated property of signed tokens — no lookups, no state, gateways stay simple. But a token minted just before revocation stays valid for up to 24 hours, missing the 60-second mandate by three orders of magnitude.
+  - id: T2
+    description: Make access tokens 60 seconds long so expiry itself is the revocation mechanism — no denylist needed.
+    violated_constraint_id: C3
+    why_attractive: It is the cleanest possible design on paper — revocation falls out of expiry, still stateless. But 2M active sessions refreshing every 60 seconds is ~33,000 refresh requests/second against a stated ceiling of 5,000.
+  - id: T3
+    description: Validate every request against the central auth service.
+    violated_constraint_id: C2
+    why_attractive: Central validation gives instant revocation with zero gateway state. But cross-region RTT is 20-80 ms against a 5 ms p99 validation budget — the request path cannot contain that call.
+
+twist:
+  description: >
+    The stateless-JWT canon ("validation needs no state, that's the point")
+    meets a 60-second revocation SLA plus three hard numbers — refresh
+    capacity, gateway memory under 5M-session mass revocation on consecutive
+    days, and a 5 ms validation budget — that jointly pin one mechanism AND
+    one token lifetime.
+  invalidated_canonical: >
+    Both textbook answers fail on arithmetic: "stateless tokens, keep them
+    short" collides with refresh capacity (g2/T2), and "stay stateless,
+    24-hour tokens" collides with the mandate (g1/T1). The entailed design is
+    the hybrid the canon calls impure: a gateway denylist for fast
+    revocation, with token lifetime bounding denylist retention.
+  twist_gold_refs: [g1, g2]
+
+gold_rationale: |
+  Mechanism (g1, T1, T3): the 60s mandate (C1) with a 5 ms validation budget
+  (C2) rules out both stateless-until-expiry (revocation latency = token
+  lifetime) and per-request central checks (20-80 ms RTT >> 5 ms). What
+  remains is local validation plus a pushed denylist: feed p99 5s <= 60s
+  satisfies C1, and an in-memory lookup costs microseconds.
+
+  Token lifetime is uniquely 15 minutes (g2) by two independent
+  computations:
+  - Refresh load (C3): lifetime L means ~2M/L refreshes/second.
+    60s -> ~33,300/s (6.7x over the 5,000/s ceiling — T2 fails).
+    15m -> ~2,200/s (fits). 24h -> ~23/s (fits, but see memory).
+  - Denylist memory (C4): a revocation entry must be retained until the
+    revoked token would have expired — retention = L (ttl-expiry, g6). A 5M
+    mass event costs 5M x 64B = 320 MB. At L=15m, entries expire in minutes;
+    even consecutive-day events never overlap: peak 320 MB <= 400 MB. At
+    L=24h, entries persist a full day, and the stated consecutive-day events
+    overlap: 640 MB > 400 MB — 24h fails.
+  Only 15 minutes satisfies both inequalities.
+
+  Feed partition behavior (g3, g4, g5, g7): a gateway that has missed feed
+  heartbeats beyond a staleness bound can no longer promise C1 locally.
+  Fail-open silently breaks the mandate exactly when it matters; fail-closed
+  turns a feed hiccup into a global outage. The entailed fallback is
+  degraded-mode central validation (correct, slower, and rate-bounded — only
+  stale gateways use it), which is staleness-fallback plus
+  heartbeat-timeout-detection by name.

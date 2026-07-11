@@ -1,0 +1,189 @@
+# De-labeled large-scale chat with the canon inverted: message delivery is the
+# easy part; PRESENCE fan-out is the real load (100x messages). Models that
+# recite "design WhatsApp" answers optimize the wrong flow and fail the
+# fan-out arithmetic items.
+instance_id: chat-presence-2m-001
+domain: workplace-chat
+difficulty: hard
+version: "0.2.0"
+split: public
+
+problem_statement: |
+  A workplace collaboration suite is building its chat backend. At peak,
+  2,000,000 employees are connected simultaneously. Each user has on average
+  150 contacts whose availability status (online/away/offline) can appear in
+  their sidebar, and a contact's status transition should be visible within
+  10 seconds — when the viewer actually has that sidebar or conversation open.
+  On average, any given user's status is being actively displayed by about 3
+  other users at any moment.
+
+  A large share of clients are mobile. Measured behavior: a mobile client's
+  connection flaps (drop + reconnect) about 30 times per hour on average, and
+  most drops reconnect within 20 seconds.
+
+  Message traffic peaks at 20,000 messages/second, delivered to small
+  conversations (avg 4 recipients). Messages must not be lost once accepted,
+  and each conversation must display messages in a consistent order for all
+  participants. After a reconnect, a client must converge to the correct
+  conversation and presence state.
+
+  The delivery fleet is budgeted to push at most 200,000 downstream
+  notifications/second at peak (all types combined). Design the presence and
+  message delivery architecture within that budget.
+
+context: |
+  Clients maintain a persistent connection to a gateway fleet. Presence has
+  no durability requirement — it is reconstructed from live connections.
+  Typing indicators exist but only inside an open conversation.
+
+constraints:
+  - id: C1
+    type: scale
+    value: "2M concurrent users; 150 avg contacts; a user's status actively viewed by ~3 others at any moment; mobile flap rate ~30/hour/user, most reconnect within 20s"
+  - id: C2
+    type: throughput
+    value: "delivery fleet budget: <= 200,000 downstream notifications/second total at peak"
+  - id: C3
+    type: latency
+    value: "presence transitions visible to active viewers within 10 seconds (eventual is fine); typing indicators only within open conversations"
+  - id: C4
+    type: durability
+    value: "accepted messages are never lost; per-conversation consistent ordering for all participants"
+
+requirements:
+  - id: R1
+    text: Deliver messages to conversation participants reliably and in consistent per-conversation order.
+  - id: R2
+    text: Show contact presence transitions to active viewers within 10 seconds without exceeding the delivery budget.
+  - id: R3
+    text: Clients converge to correct conversation and presence state after reconnecting.
+  - id: R4
+    text: Mobile connection flaps must not translate into fleet-wide notification storms.
+    implicit: true
+
+flows:
+  - id: presence_fanout
+    description: Who receives a user's status transition, and when.
+    decision_slots:
+      scope: [broadcast-to-all-contacts, subscribed-active-viewers-only]
+      flap_handling: [immediate-broadcast-per-transition, debounce-with-grace-window]
+  - id: message_delivery
+    description: Message transport and ordering.
+    decision_slots:
+      ordering: [per-conversation-order, global-total-order]
+  - id: presence_state
+    description: Where live presence state lives.
+    decision_slots:
+      durability: [in-memory-reconstructable, durably-persisted-per-transition]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: presence_fanout
+    slot: scope
+    acceptable: [subscribed-active-viewers-only]
+  - id: g2
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: presence_fanout
+    slot: flap_handling
+    acceptable: [debounce-with-grace-window]
+  - id: g3
+    dimension: tradeoff_selection
+    check: pattern_required
+    acceptable: [presence-debouncing]
+  - id: g4
+    dimension: tradeoff_selection
+    check: pattern_required
+    acceptable: [interest-management]
+  - id: g5
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: message_delivery
+    slot: ordering
+    acceptable: [per-conversation-order]
+  - id: g6
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: presence_state
+    slot: durability
+    acceptable: [in-memory-reconstructable]
+  - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [reconciliation-on-reconnect]
+  - id: g8
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
+    acceptable: [presence-debouncing]
+  - id: g9
+    dimension: operability
+    check: pattern_required
+    acceptable: [backpressure, bounded-queues, load-shedding]
+  - id: g10
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 10
+
+traps:
+  - id: T1
+    description: Broadcast every status transition to all 150 contacts ("that's what the contact list is for").
+    violated_constraint_id: C2
+    why_attractive: It is the obvious reading of the requirement and what small-scale chat tutorials do. But 2M users x 30 flaps/hour = ~16,700 transitions/second, and x150 contacts that is ~2.5M notifications/second — 12x the entire delivery budget before a single message is sent.
+  - id: T2
+    description: Broadcast each connect/disconnect immediately as it happens.
+    violated_constraint_id: C1
+    why_attractive: Immediate feels more correct than delayed, and the 10s freshness bound seems to demand promptness. But most mobile drops reconnect within 20 seconds; a short grace window inside the 10s-visible bound for GOING-offline collapses the flap pair into zero notifications, cutting presence load roughly in half.
+  - id: T3
+    description: Persist every presence transition durably "so state survives restarts".
+    violated_constraint_id: C1
+    why_attractive: Durable state sounds strictly safer. But presence is explicitly reconstructable from live connections; durably writing ~16,700 ephemeral transitions/second buys nothing and creates a write-load problem the requirements never asked for.
+
+twist:
+  description: >
+    A chat-scale problem where the scored load is presence fan-out, not
+    message delivery — the delivery budget makes the naive presence design
+    arithmetically impossible while messages remain easy.
+  invalidated_canonical: >
+    The canonical "design WhatsApp/Slack" answer centers message queues,
+    delivery receipts, and storage sharding, treating presence as a trivial
+    broadcast. Here that recitation fails g1-g4 and g8: presence fan-out at
+    2.5M notifications/second is 12x the stated budget, and only
+    viewer-subscription (interest management) plus flap debouncing bring it
+    inside.
+  twist_gold_refs: [g1, g2, g3, g4]
+
+gold_rationale: |
+  Presence arithmetic (g1-g4, T1, T2): transitions = 2M users x 30/hour /
+  3600 ~= 16,700/second. Naive fan-out x150 contacts ~= 2.5M
+  notifications/second vs a 200K/second total budget (C2) — over by 12x, so
+  broadcast-to-all-contacts is not a style choice but an arithmetic violation.
+  The stated viewing fact (~3 active viewers per user, C1) is the lever:
+  fanning out only to subscribed active viewers gives 16,700 x 3 ~= 50K/s.
+  Debouncing with a grace window shorter than the 10s visibility bound (C3)
+  absorbs the dominant flap pattern (drop + reconnect within 20s — the
+  offline+online pair collapses for any viewer who never saw the gap),
+  roughly halving even that. Combined: ~25-50K/s presence + message fan-out
+  (20K msgs/s x ~3 online recipients ~= 60K/s) lands comfortably inside 200K/s.
+
+  Message path (g5, C4): per-conversation ordering satisfies the stated
+  consistency requirement; global total order across 20K msgs/s adds
+  cross-conversation coordination no requirement asks for — over-engineering
+  the parsimony cap and slot both catch.
+
+  Presence state residency (g6, T3): presence is declared reconstructable
+  from live connections; in-memory per-gateway state with reconnect
+  reconciliation (g7) is entailed, and durable per-transition writes create
+  16.7K/s of storage load with zero requirement behind it.
+
+  Overload posture (g9): the fleet budget is a hard number; when input
+  exceeds it (mass reconnect after a network event), bounded queues with
+  shedding/backpressure on the presence path (never the durable message
+  path, C4) is the operable failure mode.

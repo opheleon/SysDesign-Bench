@@ -1,0 +1,148 @@
+# On-device search under a hard index-size budget: the server-search reflex is
+# unavailable by construction, and stated prototype measurements make the
+# feature-set tradeoff (dropping positional/phrase indexing) arithmetically
+# entailed rather than stylistic.
+instance_id: ondevice-search-001
+domain: mobile-app
+difficulty: medium
+version: "0.2.0"
+split: public
+
+problem_statement: |
+  A mobile email/notes client must provide full-text search that works
+  fully offline (its users include field crews and frequent flyers; offline
+  search is the headline feature of the release).
+
+  Facts:
+  - Typical heavy user: ~200,000 documents, ~2 GB of extracted text.
+  - The search index gets a hard budget of 50 MB on device (app-size and
+    backup constraints negotiated with the platform team; not movable).
+  - Query latency: p99 <= 50 ms on mid-range phones.
+  - New/edited documents (~200/day typical) must be searchable within one
+    minute, without noticeable battery cost.
+  - A prototype measured index sizes on the reference corpus:
+    term-only index with compressed posting lists: ~45 MB;
+    adding positional data for phrase/proximity queries: ~620 MB.
+
+  Design the on-device index: structure, feature set, and update strategy.
+
+context: |
+  Ranking uses static per-document signals plus term statistics; product
+  has agreed that exact-phrase search may be approximated (candidate
+  documents from term matches, phrase-verified by scanning the candidate's
+  text on demand).
+
+constraints:
+  - id: C1
+    type: scale
+    value: "index budget hard-capped at 50 MB; corpus ~2 GB text / 200k documents; measured: term-only compressed ~45 MB, positional ~620 MB"
+  - id: C2
+    type: latency
+    value: "query p99 <= 50 ms on mid-range phones; new documents searchable within 60 s"
+  - id: C3
+    type: availability
+    value: "search must work fully offline — no server fallback"
+  - id: C4
+    type: budget
+    value: "index updates must not cause noticeable battery drain (full corpus reindex measured at ~9 minutes CPU on reference device)"
+
+requirements:
+  - id: R1
+    text: Full-text term search over all documents, offline, within the latency budget.
+  - id: R2
+    text: New and edited documents searchable within one minute.
+  - id: R3
+    text: The index fits the 50 MB budget on heavy-user corpora.
+  - id: R4
+    text: Phrase queries return correct results via the agreed candidate-verification approach.
+
+flows:
+  - id: index_features
+    description: What the index stores, given the size budget.
+    decision_slots:
+      feature_set: [term-only-compressed-postings, full-positional-phrase-index]
+  - id: index_updates
+    description: How document changes reach the index.
+    decision_slots:
+      strategy: [incremental-segments-with-background-merge, full-rebuild-on-change]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: pattern_required
+    acceptable: [inverted-index]
+  - id: g2
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: index_features
+    slot: feature_set
+    acceptable: [term-only-compressed-postings]
+  - id: g3
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: index_updates
+    slot: strategy
+    acceptable: [incremental-segments-with-background-merge]
+  - id: g4
+    dimension: operability
+    check: pattern_required
+    acceptable: [compaction-strategy]
+  - id: g5
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [inverted-index]
+  - id: g6
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 6
+
+traps:
+  - id: T1
+    description: Include positional data "so phrase search works properly".
+    violated_constraint_id: C1
+    why_attractive: Phrase queries are a real feature and positional postings are the textbook way to serve them. But the prototype MEASURED it — 620 MB against a 50 MB budget, 12x over. The context explicitly licenses candidate-verification for phrases; taking the textbook path anyway is reciting past a stated number.
+  - id: T2
+    description: Rebuild the index from scratch on document changes ("simplest correct approach").
+    violated_constraint_id: C4
+    why_attractive: Full rebuild avoids merge logic entirely, and 200 changes/day sounds small. But a rebuild is ~9 minutes of CPU (stated) — running it up to 200 times a day on a phone violates the battery constraint by hours of CPU, and misses the 60 s freshness bound during rebuilds.
+  - id: T3
+    description: Fall back to server-side search for heavy queries.
+    violated_constraint_id: C3
+    why_attractive: "It is where every scaling instinct leads — phones are weak, servers are strong. C3 forecloses it: offline IS the feature being shipped."
+
+twist:
+  description: >
+    A search problem where the two standard answers — a search service, or a
+    full-featured local index — are respectively forbidden by requirement
+    and by measured arithmetic, forcing an explicit feature sacrifice.
+  invalidated_canonical: >
+    "Use a search engine service" fails C3 outright, and the textbook
+    full-positional local index fails g2/T1 against the stated 620 MB vs
+    50 MB measurement. The entailed design is a term-only compressed
+    inverted index inside the budget, phrase queries via candidate
+    verification, and incremental segment updates with background merges.
+  twist_gold_refs: [g2]
+
+gold_rationale: |
+  Feature set (g1, g2, g5, T1, T3): the prototype measurements make the
+  slot arithmetic, not judgment: term-only compressed = ~45 MB (fits the
+  50 MB cap with headroom for growth via aggressive posting compression and
+  dictionary pruning); positional = ~620 MB (12.4x over — no compression
+  scheme closes an order of magnitude). Phrase correctness (R4) is
+  preserved by the agreed candidate-verification path: term-intersection
+  produces candidates; the phone scans candidate documents' text on demand
+  — bounded work because candidate sets are small.
+
+  Updates (g3, g4, T2): 200 changes/day against a ~9-minute full rebuild
+  means rebuild-on-change costs up to ~30 hours of CPU/day in the worst
+  case and breaks the 60 s freshness bound whenever a rebuild is running.
+  The entailed structure is small incremental segments (a fresh segment
+  absorbs new documents within seconds, satisfying R2) merged in the
+  background under battery-charging conditions — which is a compaction
+  strategy by name, keeping segment count (and thus query fan-out across
+  segments) low enough to protect the 50 ms p99 (C2).

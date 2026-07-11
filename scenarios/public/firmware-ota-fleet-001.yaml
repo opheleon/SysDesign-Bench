@@ -1,0 +1,206 @@
+# Migration-safety in embedded clothing: fleet firmware updates where the
+# CI/CD deploy canon fails — you cannot "roll back" a bricked device, power
+# can vanish mid-flash, and (buried in the vendor-contract context, haystack
+# lever) devices may not check in for 10 weeks, so the campaign tail is
+# months and the server must speak old firmware versions throughout.
+instance_id: firmware-ota-fleet-001
+domain: device-fleet
+difficulty: hard
+version: "0.2.0"
+split: public
+
+problem_statement: |
+  An agricultural-sensing company operates 100,000 soil-condition devices
+  and must ship firmware updates over the air (a security patch cadence is
+  now contractual). Facts:
+
+  - Devices are solar/battery powered in the field. Power can be lost at
+    ANY moment, including mid-write to flash.
+  - Device flash has capacity for two full firmware images.
+  - A device that no longer boots is a field visit costing ~$400; the
+    business tolerates at most 0.1% of the fleet lost per campaign
+    (100 devices), and a systematic bricking defect is existential.
+  - Devices check in over cellular on their own schedule (see connectivity
+    agreement excerpt below) and pull updates when they check in.
+
+  Design the update mechanism on-device, the campaign rollout strategy, and
+  the server-side posture during a campaign.
+
+context: |
+  Excerpt, Connectivity & Field Operations Agreement (rev 4):
+
+  "§2.1 Devices initiate all communication. Scheduled check-in is daily
+  where coverage permits. §2.4 For sites in the Extended Coverage tier
+  (approximately 30% of deployed units), devices may batch check-ins to
+  conserve power; the Supplier warrants only that each such device checks
+  in at least once per 10-week period. §3.2 The BLE diagnostic port is
+  reserved for commissioning and is not available for remote operations.
+  §5.1 Firmware manifests were migrated from XML to CBOR in rev 3; XML
+  manifests remain readable by bootloaders prior to build 240 but are
+  deprecated."
+
+  Fleet telemetry shows the previous campaign's check-in histogram matched
+  §2.4: half the fleet within 3 days, 95% within 3 weeks, the last few
+  percent trickling in for over two months.
+
+constraints:
+  - id: C1
+    type: durability
+    value: "power loss possible at any instant, including mid-flash; a non-booting device costs ~$400 and campaign brick budget is <= 0.1%"
+  - id: C2
+    type: compliance
+    value: "contractual security patch cadence; a systematic bricking defect is existential — bad firmware must be caught before broad exposure"
+  - id: C3
+    type: network
+    value: "device-initiated check-ins; Extended Coverage tier (~30% of fleet) warrants only one check-in per 10 weeks (Agreement §2.4)"
+  - id: C4
+    type: scale
+    value: "100,000 devices; flash holds two full firmware images"
+
+requirements:
+  - id: R1
+    text: Devices install updates without risk of becoming unbootable on power loss.
+  - id: R2
+    text: A defective firmware build is detected and halted before broad fleet exposure.
+  - id: R3
+    text: The server side operates correctly for the full duration of a campaign, including its long tail.
+    implicit: true
+  - id: R4
+    text: A device that boots into a bad image recovers without a field visit.
+
+flows:
+  - id: flash_strategy
+    description: How the new image gets onto the device.
+    decision_slots:
+      strategy: [write-to-inactive-partition-atomic-switch, overwrite-active-image-in-place]
+  - id: boot_failure
+    description: Device behavior when the new image fails health checks after boot.
+    decision_slots:
+      policy: [auto-rollback-to-previous-partition, retry-new-image-forever, wait-for-remote-rescue]
+  - id: rollout
+    description: How the campaign exposes the fleet to the new build.
+    decision_slots:
+      strategy: [staged-cohorts-with-health-gates, fleet-wide-immediately]
+  - id: campaign_window
+    description: Planning assumption for campaign completion.
+    decision_slots:
+      assumption: [complete-within-two-weeks, multi-month-tail-expected]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: migration_safety
+    check: slot_match
+    flow: flash_strategy
+    slot: strategy
+    acceptable: [write-to-inactive-partition-atomic-switch]
+  - id: g2
+    dimension: migration_safety
+    check: pattern_required
+    acceptable: [ab-partition-update]
+  - id: g3
+    dimension: migration_safety
+    check: slot_match
+    flow: boot_failure
+    slot: policy
+    acceptable: [auto-rollback-to-previous-partition]
+  - id: g4
+    dimension: operability
+    check: pattern_required
+    acceptable: [watchdog-timer]
+  - id: g5
+    dimension: migration_safety
+    check: slot_match
+    flow: rollout
+    slot: strategy
+    acceptable: [staged-cohorts-with-health-gates]
+  - id: g6
+    dimension: migration_safety
+    check: pattern_required
+    acceptable: [staged-rollout]
+  - id: g7
+    dimension: migration_safety
+    check: slot_match
+    flow: campaign_window
+    slot: assumption
+    acceptable: [multi-month-tail-expected]
+  - id: g8
+    dimension: migration_safety
+    check: pattern_required
+    acceptable: [versioned-api-compatibility]
+  - id: g9
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [versioned-api-compatibility]
+  - id: g10
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
+    acceptable: [ab-partition-update, watchdog-timer]
+  - id: g11
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 8
+
+traps:
+  - id: T1
+    description: Flash the new image over the running image ("the device only needs one image slot; use the rest of flash for data").
+    violated_constraint_id: C1
+    why_attractive: Reclaiming half the firmware flash is a real, tempting win on a constrained device. But with in-place overwrite, a power loss mid-flash leaves NO bootable image — and power loss at any instant is a stated operating condition, not a corner case. Across 100k devices per campaign, mid-flash losses alone would blow the 0.1% budget.
+  - id: T2
+    description: Push the build fleet-wide immediately to meet the patch cadence.
+    violated_constraint_id: C2
+    why_attractive: The security contract creates urgency, and staging feels like delay. But a systematic defect shipped fleet-wide converts one bad build into up to 100,000 x $400 of field visits; health-gated cohorts cap the exposure at the first gate while still patching the reachable fleet fast.
+  - id: T3
+    description: Plan the campaign as a two-week event; treat stragglers as exceptions and retire the old firmware's server support when the campaign "ends".
+    violated_constraint_id: C3
+    why_attractive: 95% of the fleet updating within three weeks makes two weeks look like the whole story, and keeping old API/manifest support around feels like debt. But §2.4 warrants only one check-in per 10 WEEKS for 30% of the fleet — the tail is contractual, not exceptional, and a server that drops old-version support mid-tail strands every device that hasn't checked in yet.
+
+twist:
+  description: >
+    A deployment problem where the deploy canon's core assumptions — you can
+    push, you can roll back centrally, the rollout window is the rollout —
+    are all false: devices pull on their own schedule, rollback must live
+    on-device, and a contract clause buried in the connectivity agreement
+    makes the campaign tail ten weeks minimum.
+  invalidated_canonical: >
+    The CI/CD rollout canon (push to the fleet, watch dashboards, roll back
+    from the server) fails g1/g3/g7: there is no push channel, no central
+    rollback for a device that cannot boot, and no two-week campaign — the
+    §2.4 check-in warranty (the buried fact) forces a multi-month tail with
+    versioned server-side compatibility for old firmware throughout.
+  twist_gold_refs: [g1, g3, g7]
+
+gold_rationale: |
+  Power-loss safety (g1, g2, T1): flash holds two images (C4) precisely so
+  the new image is written entirely to the inactive partition and activated
+  by an atomic boot-flag switch. At every instant of the write, the old
+  image remains intact and bootable — power loss costs a retry, not a
+  brick. In-place overwrite makes every mid-write loss a $400 visit; with
+  ~even a 0.05% chance of power loss during a multi-minute flash window per
+  device, in-place alone consumes the campaign brick budget.
+
+  On-device recovery (g3, g4, g10, R4): a new image that boots but fails
+  health checks (or hangs, caught by the watchdog) must revert WITHOUT the
+  server: the bootloader falls back to the previous partition after N
+  failed boots. Retry-forever wedges the device; wait-for-rescue assumes a
+  push channel that does not exist (§2.1: devices initiate).
+
+  Blast-radius control (g5, g6, T2): cohort gates with health criteria
+  (successful boot + check-in rate of updated cohort) cap a systematic
+  defect's exposure at the first cohort (e.g. 1% = 1,000 devices held to
+  the 0.1% budget by the gate), satisfying C2's "before broad exposure".
+
+  The buried tail (g7, g8, g9, T3): §2.4 warrants one check-in per 10 weeks
+  for ~30% of devices — so a campaign mathematically cannot complete in two
+  weeks, and the histogram in context confirms a multi-month tail. The
+  server must therefore accept old-firmware protocols/manifests for the
+  entire tail (versioned compatibility), and campaign accounting must treat
+  the tail as normal. Decoys: the BLE port (§3.2) is explicitly unavailable
+  for remote ops, and the XML/CBOR manifest note (§5.1) affects only
+  pre-240 bootloaders — neither changes the design; reacting to them is
+  pattern spray the parsimony cap punishes.
