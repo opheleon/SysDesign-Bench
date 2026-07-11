@@ -3,7 +3,7 @@
 # control are entailed by the request and concurrency arithmetic.
 instance_id: retry-budget-callgraph-001
 domain: service-callgraph-resilience
-difficulty: hard
+difficulty: easy
 version: "0.3.0"
 split: public
 

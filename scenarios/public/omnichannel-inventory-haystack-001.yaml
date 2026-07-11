@@ -6,7 +6,7 @@
 # isolates requirements-extraction-under-load from design skill.
 instance_id: omnichannel-inventory-haystack-001
 domain: retail-commerce
-difficulty: hard
+difficulty: medium
 version: "0.3.0"
 split: public
 

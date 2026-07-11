@@ -3,7 +3,7 @@
 # safe re-entry requires both a generation fence and destructive bootstrap.
 instance_id: tombstone-resurrection-001
 domain: replicated-key-value-storage
-difficulty: hard
+difficulty: medium
 version: "0.3.0"
 split: public
 

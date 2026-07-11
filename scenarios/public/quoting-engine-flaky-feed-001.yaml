@@ -3,7 +3,7 @@
 # the scored substance is behaving correctly under degraded market data.
 instance_id: quoting-engine-flaky-feed-001
 domain: market-quoting
-difficulty: hard
+difficulty: medium
 version: "0.3.0"
 split: public
 

@@ -4,7 +4,7 @@
 # fan-out arithmetic items.
 instance_id: chat-presence-2m-001
 domain: workplace-chat
-difficulty: hard
+difficulty: medium
 version: "0.3.0"
 split: public
 

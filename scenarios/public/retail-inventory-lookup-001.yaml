@@ -3,7 +3,7 @@
 # topology, and intercontinental store locations are jointly unsatisfiable.
 instance_id: retail-inventory-lookup-001
 domain: retail-inventory
-difficulty: medium
+difficulty: easy
 version: "0.3.0"
 split: public
 

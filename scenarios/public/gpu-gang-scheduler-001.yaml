@@ -3,7 +3,7 @@
 # interval, and backfill is safe only before the derived reservation boundary.
 instance_id: gpu-gang-scheduler-001
 domain: compute-scheduling
-difficulty: hard
+difficulty: medium
 version: "0.3.0"
 split: public
 

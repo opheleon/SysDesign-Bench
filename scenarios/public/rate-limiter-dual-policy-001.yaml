@@ -4,7 +4,7 @@
 # dies on the latency arithmetic.
 instance_id: rate-limiter-dual-policy-001
 domain: api-platform
-difficulty: medium
+difficulty: easy
 version: "0.3.0"
 split: public
 

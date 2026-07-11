@@ -5,7 +5,7 @@
 # design-mode sibling.
 instance_id: ticket-onsale-clarify-001
 domain: ticketing
-difficulty: medium
+difficulty: easy
 version: "0.3.0"
 split: public
 

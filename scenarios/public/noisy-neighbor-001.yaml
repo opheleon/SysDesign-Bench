@@ -4,7 +4,7 @@
 # machines. The scenario states that autoscaling was already tried.
 instance_id: noisy-neighbor-001
 domain: saas-platform
-difficulty: hard
+difficulty: easy
 version: "0.3.0"
 split: public
 

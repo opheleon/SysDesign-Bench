@@ -4,7 +4,7 @@
 # entailed rather than stylistic.
 instance_id: ondevice-search-001
 domain: mobile-app
-difficulty: medium
+difficulty: easy
 version: "0.3.0"
 split: public
 

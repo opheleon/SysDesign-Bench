@@ -5,7 +5,7 @@
 # months and the server must speak old firmware versions throughout.
 instance_id: firmware-ota-fleet-001
 domain: device-fleet
-difficulty: hard
+difficulty: medium
 version: "0.3.0"
 split: public
 

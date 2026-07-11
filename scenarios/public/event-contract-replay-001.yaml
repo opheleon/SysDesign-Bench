@@ -3,7 +3,7 @@
 # and schema-registry compatibility insufficient.
 instance_id: event-contract-replay-001
 domain: event-platform
-difficulty: hard
+difficulty: medium
 version: "0.3.0"
 split: public
 

@@ -4,7 +4,7 @@
 # deployed.
 instance_id: point-in-time-feature-store-001
 domain: machine-learning-platform
-difficulty: hard
+difficulty: medium
 version: "0.3.0"
 split: public
 

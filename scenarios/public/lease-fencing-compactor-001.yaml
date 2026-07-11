@@ -3,7 +3,7 @@
 # atomically by the metadata sink, not from the worker checking its own lease.
 instance_id: lease-fencing-compactor-001
 domain: distributed-storage-maintenance
-difficulty: hard
+difficulty: medium
 version: "0.3.0"
 split: public
 

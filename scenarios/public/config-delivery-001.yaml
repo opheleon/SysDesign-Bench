@@ -4,7 +4,7 @@
 # ("etcd/Consul watches, apply on change") is the scored trap.
 instance_id: config-delivery-001
 domain: platform-infra
-difficulty: medium
+difficulty: easy
 version: "0.3.0"
 split: public
 

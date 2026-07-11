@@ -5,7 +5,7 @@
 # cannot meet the numbers. Anti-gaming mirror of the infeasible scenarios.
 instance_id: delivery-promise-feasible-001
 domain: logistics
-difficulty: hard
+difficulty: easy
 version: "0.3.0"
 split: public
 

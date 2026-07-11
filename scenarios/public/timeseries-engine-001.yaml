@@ -4,7 +4,7 @@
 # crypto-shredding is the only answer that survives the arithmetic.
 instance_id: timeseries-engine-001
 domain: metrics-platform
-difficulty: hard
+difficulty: medium
 version: "0.3.0"
 split: public
 

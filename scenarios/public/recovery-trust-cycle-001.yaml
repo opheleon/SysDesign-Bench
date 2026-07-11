@@ -3,7 +3,7 @@
 # other; no orchestration order has a legal first step.
 instance_id: recovery-trust-cycle-001
 domain: disaster-recovery
-difficulty: hard
+difficulty: easy
 version: "0.3.0"
 split: public
 

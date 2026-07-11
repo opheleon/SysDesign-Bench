@@ -4,7 +4,7 @@
 # compensation. Uniform consistency in either direction is a scored trap.
 instance_id: omnichannel-inventory-001
 domain: retail-commerce
-difficulty: hard
+difficulty: medium
 version: "0.3.0"
 split: public
 

@@ -4,7 +4,7 @@
 # designing anyway is the scored failure. Tight allowed-set punishes spam.
 instance_id: notification-clarify-001
 domain: notifications
-difficulty: medium
+difficulty: easy
 version: "0.3.0"
 split: public
 

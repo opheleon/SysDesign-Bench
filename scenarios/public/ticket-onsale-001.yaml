@@ -5,7 +5,7 @@
 # overselling lives.
 instance_id: ticket-onsale-001
 domain: ticketing
-difficulty: medium
+difficulty: easy
 version: "0.3.0"
 split: public
 

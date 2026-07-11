@@ -3,7 +3,7 @@
 # propagated barriers and recorded stream offsets close a logical cut.
 instance_id: causal-audit-snapshot-001
 domain: distributed-audit-reporting
-difficulty: hard
+difficulty: medium
 version: "0.3.0"
 split: public
 
