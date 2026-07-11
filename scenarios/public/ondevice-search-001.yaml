@@ -30,15 +30,21 @@ context: |
   Ranking uses static per-document signals plus term statistics; product
   has agreed that exact-phrase search may be approximated (candidate
   documents from term matches, phrase-verified by scanning the candidate's
-  text on demand).
+  text on demand). The prototype measured phrase verification on the
+  reference corpus: the 99th-percentile candidate set is 140 documents,
+  verified in 14 ms on the reference mid-range phone (p95 across the
+  query log: 18 ms end-to-end including term intersection). The 50 MB
+  budget is a PEAK bound covering base index + incremental delta
+  segments + merge scratch together; the prototype's tiered-merge
+  configuration peaked at 48 MB with the 45 MB base.
 
 constraints:
   - id: C1
     type: scale
-    value: "index budget hard-capped at 50 MB; corpus ~2 GB text / 200k documents; measured: term-only compressed ~45 MB, positional ~620 MB"
+    value: "index budget hard-capped at 50 MB PEAK (base + delta segments + merge scratch combined; measured tiered-merge peak 48 MB); corpus ~2 GB text / 200k documents; measured: term-only compressed ~45 MB, positional ~620 MB"
   - id: C2
     type: latency
-    value: "query p99 <= 50 ms on mid-range phones; new documents searchable within 60 s"
+    value: "query p99 <= 50 ms on mid-range phones (measured phrase-verification path: p95 18 ms end-to-end, 99th-percentile candidate set 140 docs verified in 14 ms); new documents searchable within 60 s"
   - id: C3
     type: availability
     value: "search must work fully offline — no server fallback"

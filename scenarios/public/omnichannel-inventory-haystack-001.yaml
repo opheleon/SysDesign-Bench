@@ -1,5 +1,5 @@
 # Long-form sibling of omnichannel-inventory-001: IDENTICAL gold sets, but the
-# binding facts are buried inside ~2,800 words of realistic program
+# binding facts are buried inside ~1,200 words of realistic program
 # documentation (policy manual, marketplace agreement, IT assessment, marketing
 # memo, incident review) alongside decoys. The structured constraints are
 # deliberately pointers into the document. The score delta between this pair
@@ -184,7 +184,7 @@ constraints:
     value: "offline-sale retention and systematic reconciliation obligations per Policy §4.8 and the incident review directive (Documents 2 and 6)"
   - id: C4
     type: scale
-    value: "scale, connectivity, and capacity figures per the program brief and IT assessment (Documents 1 and 4)"
+    value: "scale, connectivity, and capacity figures — and the integration prohibitions and scope disclaimers — per the program brief, IT assessment, and marketing memo (Documents 1, 4, and 5)"
 
 requirements:
   - id: R1
@@ -259,12 +259,12 @@ gold:
   - id: g8
     dimension: tradeoff_selection
     check: pattern_forbidden
-    forbidden: [two-phase-commit, last-write-wins]
+    forbidden: [last-write-wins]
   - id: g9
     dimension: tradeoff_selection
     check: role_required
     acceptable_roles: [system-of-record]
-    acceptable_components: [postgresql-16, mysql-8]
+    acceptable_components: [postgresql-16, mysql-8, mongodb-7, cassandra-4]
   - id: g10
     dimension: requirements_coverage
     check: coverage
@@ -298,7 +298,7 @@ twist:
   description: >
     The short-form sibling (omnichannel-inventory-001) states five binding
     facts in five bullet points; this scenario buries the same facts across
-    ~2,800 words of realistic program documentation with two aggressive
+    ~1,200 words of realistic program documentation with two aggressive
     decoys. Gold sets are IDENTICAL — the score delta between siblings
     isolates requirements-extraction-under-load.
   invalidated_canonical: >

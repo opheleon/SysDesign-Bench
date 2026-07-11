@@ -57,7 +57,7 @@ constraints:
     value: "instances must start and serve correctly when the config service is unreachable, using last-known-good configuration (board finding 7)"
   - id: C2
     type: compliance
-    value: "no change reaches the whole fleet in one step; progressive exposure with automated health gates and automatic halt/revert (board finding 4)"
+    value: "no routine change reaches the whole fleet in one step; progressive exposure with automated health gates and automatic halt/revert (board finding 4). Sole exception, granted by the same finding: operator-triggered kill-switch flags from a pre-authorized, individually-reviewed emergency class may propagate fleet-wide directly"
   - id: C3
     type: scale
     value: "~10,000 instances, 3 regions, ~200 changes/day, ~80 authors"
@@ -191,8 +191,8 @@ gold_rationale: |
   failure from the incident.
 
   Kill-switch tension (g8, C4): the 2-minute emergency path coexists with
-  staged routine delivery — an explicitly privileged, pre-authorized flag
-  class (operator-triggered kill switches) may bypass stages. Designing
-  ONE pipeline for both requirements gets either a too-slow kill switch
-  or an unstaged fleet — the C4/C2 pair is only satisfiable by separating
-  the paths.
+  staged routine delivery via the exception C2 itself grants — the
+  pre-authorized, individually-reviewed emergency flag class propagates
+  directly, everything else stages. Designing ONE pipeline for both
+  requirements gets either a too-slow kill switch or an unstaged fleet —
+  the C4/C2 pair is only satisfiable by separating the paths.

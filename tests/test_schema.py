@@ -56,6 +56,26 @@ class TestCatalogs:
         assert missing_info <= catalogs.missing_info_ids
 
 
+class TestHaystackPairs:
+    """Short/long haystack siblings must keep IDENTICAL gold sets and flows,
+    or the pair's score delta stops isolating extraction-under-load."""
+
+    PAIRS = [
+        ("omnichannel-inventory-001", "omnichannel-inventory-haystack-001"),
+    ]
+
+    def test_pair_gold_and_flow_identity(self):
+        import yaml
+        from conftest import SCENARIO_DIR
+
+        for short_name, long_name in self.PAIRS:
+            short = yaml.safe_load(open(SCENARIO_DIR / f"{short_name}.yaml"))
+            long_ = yaml.safe_load(open(SCENARIO_DIR / f"{long_name}.yaml"))
+            assert short["gold"] == long_["gold"], f"gold sets differ: {short_name} vs {long_name}"
+            assert short["flows"] == long_["flows"], f"flows differ: {short_name} vs {long_name}"
+            assert short["expected_mode"] == long_["expected_mode"]
+
+
 class TestScenario:
     def test_proof_scenario_parses(self, proof_scenario: Scenario):
         assert proof_scenario.instance_id == "retail-inventory-lookup-001"

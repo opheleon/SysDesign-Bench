@@ -100,21 +100,17 @@ gold:
   - id: g5
     dimension: operability
     check: pattern_required
-    acceptable: [priority-queues]
-  - id: g6
-    dimension: tradeoff_selection
-    check: pattern_forbidden
-    forbidden: [autoscaling]
+    acceptable: [weighted-fair-queuing, priority-queues]
   - id: g7
     dimension: requirements_coverage
     check: coverage
     requirement: R1
-    acceptable: [bulkhead, priority-queues]
+    acceptable: [bulkhead, weighted-fair-queuing, priority-queues]
   - id: g8
     dimension: requirements_coverage
     check: coverage
     requirement: R2
-    acceptable: [priority-queues, queue-load-leveling, scheduled-pre-provisioning]
+    acceptable: [weighted-fair-queuing, priority-queues, queue-load-leveling]
   - id: g9
     dimension: parsimony
     check: parsimony
@@ -142,17 +138,19 @@ twist:
     not fix — and where throttling the noisy tenant breaches the other
     contract.
   invalidated_canonical: >
-    Two canons fail: "scale out to absorb load" fails g1/g6/T1 against the
+    Two canons fail: "scale out to absorb load" fails g1/T1 against the
     stated measurements (quadrupled capacity, 28x over SLO, finance
     freeze), and "rate-limit the abuser" fails T2 against the big tenant's
     throughput contract. The entailed design is scheduling, not sizing:
     per-tenant bulkheaded queues, weighted fair scheduling that gives the
     batch tenant all idle capacity but guarantees standard tenants their
-    SLO share, and per-tenant admission at intake.
-  twist_gold_refs: [g1, g6]
+    SLO share, and per-tenant admission at intake. Retaining the existing
+    autoscaler at its frozen ceiling is fine; relying on scale-on-demand
+    as the contention mechanism is the scored failure (slot g1).
+  twist_gold_refs: [g1, g5]
 
 gold_rationale: |
-  Why capacity cannot fix it (g1, g6, T1): with a shared FIFO queue, a
+  Why capacity cannot fix it (g1, T1): with a shared FIFO queue, a
   50,000-job batch ahead of a small tenant's job means the small tenant
   waits for the backlog to drain regardless of drain RATE — arrivals
   during scale-up keep landing behind the batch (the stated measurement:

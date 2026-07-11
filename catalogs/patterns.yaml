@@ -255,6 +255,10 @@ patterns:
     name: Priority queues
     category: traffic
     description: Work classes processed by priority under contention.
+  - id: weighted-fair-queuing
+    name: Weighted fair queuing
+    category: traffic
+    description: Per-class/tenant queues served by weighted fair share (WFQ/DRR); guarantees each class its share without starving others, unlike strict priority.
   - id: admission-control
     name: Admission control
     category: traffic

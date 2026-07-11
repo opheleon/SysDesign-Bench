@@ -28,10 +28,15 @@ problem_statement: |
   Operating facts: the limiter check sits on the request hot path with a
   budget of <= 1 ms added latency p99. A round trip from an edge proxy to
   the central coordination store measures 0.4-0.9 ms p50 and 3-8 ms p99
-  under load. Prepaid-tier traffic is ~2% of requests; enforcement
-  decisions for it may lag consumption by up to 60 seconds (the allowance
-  is monthly; a minute of lag is within the 2% bound at any realistic
-  consumption rate — verified by the product team).
+  under load. Prepaid-tier traffic is ~2% of requests. Prepaid
+  enforcement decisions may lag consumption by up to 60 seconds ONLY IF
+  the total allowance an edge can spend during that lag is itself
+  bounded: with ~200 edges each holding an independent copy of "remaining
+  allowance," a customer near exhaustion can be overspent by up to 200x
+  its remainder before any sync. The regional aggregators can instead
+  grant edges disjoint spend leases carved from the central remainder, so
+  the aggregate outstanding-but-unspent lease total is capped (e.g., at
+  2% of the allowance) regardless of edge count or sync timing.
 
   Design the limiter: counting, enforcement placement, and failure
   behavior for both policies.
@@ -61,7 +66,7 @@ requirements:
   - id: R2
     text: Prepaid allowances never exceeded by more than 2%, even during failures.
   - id: R3
-    text: Limiter-component failure does not take down legitimate traffic.
+    text: Limiter-component failure does not take down legitimate NON-PREPAID traffic (prepaid hard caps fail closed by contract).
   - id: R4
     text: Both policies coexist without one's failure posture leaking into the other.
     implicit: true
@@ -75,8 +80,12 @@ flows:
     description: Abuse-protection behavior when limiter state is unavailable.
     decision_slots:
       policy: [fail-open-allow, fail-closed-reject]
+  - id: prepaid_counting
+    description: How ~200 edges spend a customer's finite prepaid allowance without collectively exceeding the 2% bound.
+    decision_slots:
+      mechanism: [disjoint-edge-leases-bounded-outstanding-total, replicate-remaining-allowance-to-every-edge]
   - id: prepaid_failure
-    description: Prepaid hard-cap behavior when quota state is unavailable or stale beyond bounds.
+    description: Prepaid hard-cap behavior when quota/lease state is unavailable or stale beyond bounds.
     decision_slots:
       policy: [fail-closed-reject, fail-open-allow]
 
@@ -103,6 +112,12 @@ gold:
     flow: prepaid_failure
     slot: policy
     acceptable: [fail-closed-reject]
+  - id: g10
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: prepaid_counting
+    slot: mechanism
+    acceptable: [disjoint-edge-leases-bounded-outstanding-total]
   - id: g4
     dimension: operability
     check: pattern_required
@@ -180,9 +195,14 @@ gold_rationale: |
   bounds means reject (fail closed). One component, two postures, each
   entailed by its contract; any uniform posture violates one of them.
 
-  Prepaid mechanics (g3, T3): C3's stated 60 s lag tolerance within the
-  2% monthly bound licenses asynchronous enforcement — edges decide
-  locally against allowance state synced every few seconds; near-limit
-  customers get conservative margins so staleness cannot breach the cap.
-  Synchronous billing-store checks buy exactness nobody required at the
-  cost of the budget everybody did.
+  Prepaid mechanics (g3, g10, T3): asynchronous enforcement is licensed
+  only when the aggregate exposure during the lag is bounded. Replicating
+  "remaining allowance" to every edge is NOT bounded: near exhaustion,
+  ~200 edges can each independently spend the same remainder — up to
+  200x overspend, breaching the 2% cap regardless of how short the sync
+  lag is (the stated overspend arithmetic). Disjoint leases fix it
+  structurally: an edge may spend only allowance it exclusively holds,
+  aggregate outstanding leases are capped within the 2% bound, and lease
+  refresh happens off the hot path. Fail-closed (g3) then has a concrete
+  meaning: no lease in hand, no service. Synchronous billing-store checks
+  buy exactness nobody required at the cost of the budget everybody did.

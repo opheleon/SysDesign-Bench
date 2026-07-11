@@ -32,6 +32,12 @@ context: |
   Stores hold local stock physically present in the building; the shared
   pool at the distribution center serves online. A store sells mostly its
   own shelf stock, but ship-from-store makes store stock visible to online.
+  Store connectivity is monitored by heartbeat; an outage is detected
+  within 30 seconds, and the withhold decision for a store's stock applies
+  from detection forward. Online orders allocated against a store's stock
+  in the pre-detection window are resolved by the standard conflict
+  workflow and count toward the 0.5% cap — the cap exists precisely to
+  price that bounded window.
 
 constraints:
   - id: C1
@@ -39,7 +45,7 @@ constraints:
     value: "registers never stop: store sales complete during WAN outages (links ~99% available, ~7h/store/month down)"
   - id: C2
     type: consistency
-    value: "online checkout never allocates nonexistent inventory; oversell incidents capped at 0.5% of online orders"
+    value: "online checkout never allocates inventory it cannot verify as available at fulfillment time (verifiable-availability is the liability basis); online-vs-online races must be impossible; cross-channel conflicts created by store outages count toward the 0.5% online cancellation cap and are resolved per C3"
   - id: C3
     type: durability
     value: "offline store sales are never lost and must reconcile systematically on reconnect with a defined customer-facing outcome"
@@ -120,12 +126,12 @@ gold:
   - id: g8
     dimension: tradeoff_selection
     check: pattern_forbidden
-    forbidden: [two-phase-commit, last-write-wins]
+    forbidden: [last-write-wins]
   - id: g9
     dimension: tradeoff_selection
     check: role_required
     acceptable_roles: [system-of-record]
-    acceptable_components: [postgresql-16, mysql-8]
+    acceptable_components: [postgresql-16, mysql-8, mongodb-7, cassandra-4]
   - id: g10
     dimension: requirements_coverage
     check: coverage
@@ -186,10 +192,15 @@ gold_rationale: |
   Reconciliation (g3, g4, g6, g10, T3): during an outage, double-sale of
   the same physical unit is POSSIBLE by design — the resolution is a
   compensation workflow (saga): detect conflict on reconnect, apply the
-  defined outcome (backorder/substitute/refund), notify. LWW converges the
-  number while silently discarding a sale, failing C3's "defined
-  customer-facing outcome". 2PC across store<->center (g8) is the T1
-  trap formalized: it converts every partition into a register outage.
+  defined outcome (backorder/substitute/refund), notify. LWW (g8)
+  converges the number while silently discarding a sale, failing C3's
+  "defined customer-facing outcome". 2PC across store<->center is the T1
+  trap: it converts every partition into a register outage and fails
+  slot g1; within the always-connected online path, transactional
+  reserves of any implementation are fine (g9 accepts any store capable
+  of atomic conditional allocation — relational transactions, document
+  transactions, or single-partition conditional writes all qualify at
+  40 sales/second).
 
   Ship-from-store during outage (g7, R4): an offline store's stock cannot
   be safely promised online — the store may be selling it right now and
