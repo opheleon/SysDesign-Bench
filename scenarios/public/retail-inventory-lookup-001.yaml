@@ -4,7 +4,7 @@
 instance_id: retail-inventory-lookup-001
 domain: retail-inventory
 difficulty: medium
-version: "0.1.0"
+version: "0.3.0"
 split: public
 
 problem_statement: |

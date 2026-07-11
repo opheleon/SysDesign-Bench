@@ -17,7 +17,9 @@ from pydantic import ValidationError
 
 from . import __version__
 from .grade import grade_spec
-from .runner import make_litellm_complete, read_predictions, run_scenarios, write_predictions
+from .prompt import build_prompt
+from .providers import build_complete_fn, estimate_cost, parse_model_spec
+from .runner import append_prediction, read_predictions, run_scenarios
 from .schema import Catalogs, Scenario, load_catalogs, load_scenario, load_scenarios
 from .scoring import RunScores, render_report, score
 from .validate import validate_catalogs, validate_scenario
@@ -81,25 +83,66 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return 1 if errors else 0
 
 
+    # Assumed completion tokens per scenario for pre-run cost estimates; with
+    # high reasoning effort, thinking tokens bill as output.
+_EST_COMPLETION_TOKENS = {"none": 3000, "low": 5000, "medium": 8000, "high": 12000}
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     _load_dotenv()
     catalogs, scenarios = _load(args)
-    print(f"Running {args.model} on {len(scenarios)} scenario(s), temperature={args.temperature} ...")
-    records = run_scenarios(
-        scenarios,
-        catalogs,
-        model=args.model,
-        complete_fn=make_litellm_complete(api_base=args.api_base, api_key_env=args.api_key_env),
-        temperature=args.temperature,
-        on_progress=lambda r: print(
-            f"  {r.instance_id}: {'ok' if r.format_compliant else 'FORMAT FAIL'}"
-            f"{' (after repair)' if r.repair_attempted and r.format_compliant else ''}"
-        ),
-    )
+    reasoning = None if args.reasoning == "none" else args.reasoning
     out = Path(args.out)
-    write_predictions(records, out)
+
+    skip: set[str] = set()
+    if args.resume and out.exists():
+        skip = {r.instance_id for r in read_predictions(out)}
+        print(f"Resuming: {len(skip)} prediction(s) already in {out}.", flush=True)
+    elif out.exists():
+        out.unlink()
+
+    # Pre-run cost estimate from real prompt sizes (chars/4 ~= tokens) plus an
+    # assumed completion budget per scenario.
+    _, model_id = parse_model_spec(args.model)
+    todo = [s for s in scenarios if s.instance_id not in skip]
+    est_prompt_tokens = sum(len(build_prompt(s, catalogs)) // 4 for s in todo)
+    est_completion = _EST_COMPLETION_TOKENS[args.reasoning] * len(todo)
+    est = estimate_cost(model_id, est_prompt_tokens, est_completion)
+    print(
+        f"Running {args.model} on {len(todo)} scenario(s), reasoning={args.reasoning} | "
+        f"estimated cost: ~${est:.2f} "
+        f"(~{est_prompt_tokens:,} prompt + ~{est_completion:,} completion tokens)",
+        flush=True,
+    )
+
+    complete_fn = build_complete_fn(
+        args.model, reasoning=reasoning, api_base=args.api_base, api_key_env=args.api_key_env
+    )
+
+    def on_progress(r) -> None:
+        append_prediction(r, out)
+        status = "ok" if r.format_compliant else f"FAIL ({r.error[:60]})"
+        print(
+            f"  {r.instance_id}: {status}"
+            f"{' (after repair)' if r.repair_attempted and r.format_compliant else ''}"
+            f"  [${r.cost_usd:.4f}]",
+            flush=True,
+        )
+
+    records = run_scenarios(
+        scenarios, catalogs, args.model, complete_fn,
+        skip_instance_ids=skip, on_progress=on_progress,
+    )
     compliant = sum(r.format_compliant for r in records)
-    print(f"Wrote {len(records)} prediction(s) to {out} ({compliant}/{len(records)} format-compliant).")
+    total_cost = sum(r.cost_usd for r in records)
+    total_prompt = sum(r.prompt_tokens for r in records)
+    total_completion = sum(r.completion_tokens for r in records)
+    print(
+        f"Wrote {len(records)} prediction(s) to {out} ({compliant}/{len(records)} format-compliant). "
+        f"Actual cost: ${total_cost:.2f} "
+        f"({total_prompt:,} prompt + {total_completion:,} completion tokens).",
+        flush=True,
+    )
     return 0
 
 
@@ -171,13 +214,18 @@ def main(argv: list[str] | None = None) -> int:
 
     p_run = sub.add_parser("run", help="Run a model over scenarios -> predictions.jsonl")
     _add_data_args(p_run)
-    p_run.add_argument("--model", required=True, help="litellm model id, e.g. anthropic/claude-opus-4-8")
+    p_run.add_argument("--model", required=True,
+                       help="provider/model-id: anthropic/claude-fable-5, openai/gpt-5.6-sol, "
+                            "xai/grok-4.5, baseten/zai-org/GLM-5.2")
     p_run.add_argument("--out", default="predictions.jsonl")
-    p_run.add_argument("--temperature", type=float, default=0.0)
+    p_run.add_argument("--reasoning", choices=["none", "low", "medium", "high"], default="none",
+                       help="Reasoning effort: Anthropic extended-thinking budget / OpenAI reasoning_effort")
+    p_run.add_argument("--resume", action="store_true",
+                       help="Skip instance_ids already present in --out (crash recovery)")
     p_run.add_argument("--api-base", default=None,
-                       help="OpenAI-compatible endpoint override (e.g. https://inference.baseten.co/v1)")
+                       help="Custom OpenAI-compatible endpoint override")
     p_run.add_argument("--api-key-env", default=None,
-                       help="Env var holding the key for --api-base (e.g. BASETEN_API_KEY)")
+                       help="Env var holding the key for --api-base")
     p_run.set_defaults(func=_cmd_run)
 
     p_grade = sub.add_parser("grade", help="Grade predictions.jsonl -> scores.json (no LLM calls)")

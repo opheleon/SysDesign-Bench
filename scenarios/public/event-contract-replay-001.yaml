@@ -152,7 +152,11 @@ traps:
   - id: T1
     description: Approve the unit change because both old and new schemas declare `temperature` as a JSON number.
     violated_constraint_id: C2
-    why_attractive: Schema registries are the normal compatibility gate, and the wire type really is unchanged. But structural assignability says nothing about units. An old 32 C event and a new 32 F event have identical bytes for the field while representing 32 C and 0 C respectively.
+    why_attractive: >
+      Schema registries are the normal compatibility gate, and the wire type
+      really is unchanged. But structural assignability says nothing about
+      units. An old 32 C event and a new 32 F event have identical bytes for the
+      field while representing 32 C and 0 C respectively.
   - id: T2
     description: Infer Celsius versus Fahrenheit from `effective_at` relative to the rollout date.
     violated_constraint_id: C4
@@ -161,7 +165,11 @@ traps:
   - id: T3
     description: Deploy the new Fahrenheit writers first, relying on consumers to upgrade during the 90-day window.
     violated_constraint_id: C3
-    why_attractive: Producers are fewer and controlling them first makes the migration feel tractable. Any not-yet-upgraded consumer interprets 32 F as 32 C, a 32 C error, in billing and safety projections. Readers must understand both versions before the first new writer emits one.
+    why_attractive: >
+      Producers are fewer and controlling them first makes the migration feel
+      tractable. Any not-yet-upgraded consumer interprets 32 F as 32 C, a 32 C
+      error, in billing and safety projections. Readers must understand both
+      versions before the first new writer emits one.
 
 twist:
   description: >
@@ -207,4 +215,3 @@ gold_rationale: |
   replay then compares per-event canonical values and aggregate billing,
   safety, and warranty invariants before retirement. Together these checks
   distinguish parser compatibility from semantic replay equivalence.
-

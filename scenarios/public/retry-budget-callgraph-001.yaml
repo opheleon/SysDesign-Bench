@@ -21,10 +21,14 @@ problem_statement: |
   deadline has no value.
 
   Calls are idempotent reads. The business permits one retry for a transient
-  failure, but at most one retry across the entire logical request. When
-  inventory is persistently unhealthy, returning a partial response or 503
-  inside 800 ms is preferable to waiting. Design deadline propagation, retry
-  ownership/budgeting, and overload behavior.
+  failure, but at most one retry across the entire logical request. Measurements
+  show transient inventory 503 bursts persist for 80-120 ms: a retry within
+  50 ms succeeds less than 10% of the time, while one delayed by a jittered
+  100-150 ms succeeds more than 80%. The retry is allowed only when enough of the
+  propagated deadline remains for the delay and another attempt. When inventory
+  is persistently unhealthy, returning a partial response or 503 inside 800 ms
+  is preferable to waiting. Design deadline propagation, retry ownership and
+  backoff budgeting, and overload behavior.
 
 context: |
   The edge can attach an absolute deadline and a retry-budget header. Every
@@ -48,7 +52,7 @@ constraints:
 
 requirements:
   - id: R1
-    text: Permit one transient retry without multiplicative retry amplification across layers.
+    text: Back off and jitter the one permitted transient retry without multiplicative retry amplification across layers.
   - id: R2
     text: Fail fast inside the propagated 800 ms deadline when inventory remains unhealthy.
   - id: R3
@@ -66,7 +70,7 @@ flows:
     description: Ownership and consumption of retry attempts across the call graph.
     decision_slots:
       policy:
-        - edge-owns-one-shared-retry-token-and-all-downstream-layers-make-one-attempt
+        - edge-owns-one-shared-retry-token-with-100-150ms-jittered-backoff-downstreams-make-one-attempt
         - every-layer-keeps-three-total-attempts-with-backoff
         - each-layer-may-retry-once-if-its-local-timeout-allows
   - id: overload
@@ -93,7 +97,7 @@ gold:
     check: slot_match
     flow: retry_control
     slot: policy
-    acceptable: [edge-owns-one-shared-retry-token-and-all-downstream-layers-make-one-attempt]
+    acceptable: [edge-owns-one-shared-retry-token-with-100-150ms-jittered-backoff-downstreams-make-one-attempt]
   - id: g3
     dimension: operability
     check: slot_match
@@ -154,12 +158,14 @@ gold_rationale: |
 
   A retry-budget header initialized to one makes the edge the sole retry owner.
   Every downstream layer performs exactly one attempt and propagates the same
-  budget without consuming it. The first edge attempt creates one leaf call;
-  the optional retry creates one more, so the global maximum is two rather than
-  81. At 400 requests/second and 500 ms worst-case leaf occupancy, even the
-  pessimistic two-call bound is 400 x 2 x 0.5 = 400 concurrent calls, below the
-  2,000 limit before unrelated traffic. Backoff/jitter still governs that one
-  permitted retry, which is why retries-with-backoff covers R1.
+  budget without consuming it. If sufficient deadline remains, the edge waits a
+  jittered 100-150 ms before consuming the token; the measured 80-120 ms burst
+  duration explains why an immediate retry almost always repeats the same fault,
+  while jitter prevents edge replicas from synchronizing. The first edge attempt
+  creates one leaf call and the optional retry one more, so the global maximum is
+  two rather than 81. At 400 requests/second and 500 ms worst-case leaf occupancy,
+  even the pessimistic bound is 400 x 2 x 0.5 = 400 concurrent calls, below 2,000.
+  These explicit persistence measurements entail retries-with-backoff for R1.
 
   Deadline composition (g1, T2): the edge computes an absolute expiry 800 ms
   from admission. Each hop forwards that same timestamp and caps connect,

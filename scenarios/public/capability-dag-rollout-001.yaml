@@ -25,11 +25,17 @@ problem_statement: |
     release. This edge points from D to its prerequisite A; it creates no
     prerequisite for activating A.
 
-  Initially only E is active and no fleet advertises A, B, or C. The target is
-  A+B+C active and E inactive. A support can be advertised only after B support
-  is fleet-wide; B support can be advertised only after C support is fleet-wide.
-  A request can remain in flight for 10 minutes. For 24 hours after activation,
-  operators must be able to return to E without a code deployment.
+  Initially only E is active and no fleet advertises A, B, or C. Here "active"
+  means admitting NEW work for that capability; disabling E stops new E-mode
+  admissions but does not kill E work already admitted. The target is A+B+C
+  active and E inactive. A support can be advertised only after B support is
+  fleet-wide; B support can be advertised only after C support is fleet-wide.
+
+  An admitted E-mode request can remain in flight and make downstream calls for
+  10 minutes. Its API envelope is incompatible with the new A/B/C envelope, so
+  during that drain the same service fleets must recognize both explicitly
+  versioned API shapes even though only A/B/C accepts new work. For 24 hours
+  after activation, operators must be able to return to E without a deployment.
 
   Design the complete preparation, activation, drain/retirement, and rollback
   sequence. Also specify how the controller prevents a percentage rollout from
@@ -39,16 +45,19 @@ context: |
   Flags are strongly consistent in the rollout control plane. Every service
   instance publishes its binary's supported capabilities, and routing pools can
   be gated on those advertisements. The current binaries can keep E available
-  but inactive throughout the 24-hour rollback window. "Retire E" means remove
-  its implementation after that window, not merely switch its flag off.
+  but inactive throughout the 24-hour rollback window. A version tag routes an
+  already-admitted E envelope to the compatibility handler while new A/B/C work
+  uses the new handler; serving that drain does not make E active for the C/E
+  admission invariant. "Retire E" means remove its handler after that window,
+  not merely switch its admission flag off.
 
 constraints:
   - id: C1
     type: consistency
-    value: "every reachable active state must satisfy A -> B, B -> C, and not(C and E); D -> A is one-way and D is outside the target"
+    value: "every reachable new-work admission state must satisfy A -> B, B -> C, and not(C and E); D -> A is one-way and D is outside the target"
   - id: C2
     type: availability
-    value: "no traffic stop; old and new binaries coexist, and an in-flight request may live for 10 minutes"
+    value: "no traffic stop; mixed binaries and incompatible version-tagged E versus A/B/C API envelopes coexist while already-admitted E work drains for up to 10 minutes"
   - id: C3
     type: durability
     value: "for 24 hours after A activation, rollback to E must require flags only and must traverse no invalid intermediate state"
@@ -66,10 +75,10 @@ requirements:
 
 flows:
   - id: transition
-    description: The complete forward sequence and the rollback sequence available during the observation window.
+    description: The complete forward sequence, including concurrent old-envelope drain, and the rollback sequence available during the observation window.
     decision_slots:
       sequence:
-        - prepare-c-then-b-then-a-disable-e-activate-c-then-b-then-a-drain-10m-observe-24h-retire-e-rollback-a-off-then-b-off-then-c-off-then-e-on
+        - forward-prepare-c-b-a-disable-e-activate-c-b-a-drain-10m-observe-24h-then-retire-e__rollback-during-window-a-off-b-off-c-off-then-e-on
         - prepare-a-b-c-activate-a-b-c-disable-e-retire-e-immediately-rollback-e-on
         - prepare-d-a-b-c-disable-e-activate-d-a-b-c-retire-e-rollback-c-b-a-e
   - id: rollout_guard
@@ -90,7 +99,7 @@ gold:
     check: slot_match
     flow: transition
     slot: sequence
-    acceptable: [prepare-c-then-b-then-a-disable-e-activate-c-then-b-then-a-drain-10m-observe-24h-retire-e-rollback-a-off-then-b-off-then-c-off-then-e-on]
+    acceptable: [forward-prepare-c-b-a-disable-e-activate-c-b-a-drain-10m-observe-24h-then-retire-e__rollback-during-window-a-off-b-off-c-off-then-e-on]
   - id: g2
     dimension: migration_safety
     check: slot_match
@@ -111,7 +120,7 @@ gold:
     dimension: requirements_coverage
     check: coverage
     requirement: R3
-    acceptable: [versioned-api-compatibility, graceful-degradation]
+    acceptable: [versioned-api-compatibility]
   - id: g6
     dimension: parsimony
     check: parsimony
@@ -123,9 +132,9 @@ traps:
     violated_constraint_id: C1
     why_attractive: Percentage canaries are the normal safe-release primitive and each individual service can look healthy. But an A-active instance can route to a B-inactive pool, and B can route to C-inactive code. Retrying merely samples the same invalid state; it cannot make a missing prerequisite exist.
   - id: T2
-    description: Activate C before switching E off, then remove E immediately once A appears healthy.
+    description: Remove E's implementation immediately once A appears healthy.
     violated_constraint_id: C3
-    why_attractive: Overlap usually makes a migration safer, and early cleanup reduces compatibility debt. Here overlap is explicitly forbidden for C and E, while immediate removal of E destroys the flag-only rollback path before the required 24-hour window ends.
+    why_attractive: Early cleanup reduces compatibility debt and the active target no longer uses E. But removing its implementation destroys the required flag-only rollback path before the 24-hour observation window ends; E must remain present but inactive until that deadline.
   - id: T3
     description: Prepare and activate D before A because the graph contains D -> A.
     violated_constraint_id: C1
@@ -148,8 +157,11 @@ gold_rationale: |
   Forward proof (g1): start S0={E}. Preparing C support does not activate C, so
   S0 remains valid. Once C support is fleet-wide, B support may be advertised;
   once B support is fleet-wide, A support may be advertised (C4). Switching E
-  off yields {}, then activating C, B, and A in that order yields {C}, {B,C},
-  and {A,B,C}. Every state satisfies A -> B, B -> C, and not(C and E).
+  off for NEW admissions yields {}, then activating C, B, and A in that order
+  yields {C}, {B,C}, and {A,B,C}. Every admission state satisfies A -> B,
+  B -> C, and not(C and E). Previously admitted E requests may still execute;
+  by definition they do not reopen E admissions and therefore do not violate
+  the exclusion edge.
   Activating A first immediately violates A -> B; activating B before C violates
   B -> C; activating C before E is off violates the exclusion edge.
 
@@ -160,12 +172,15 @@ gold_rationale: |
   1% old pool and observe an invalid edge. Feature-flag cutover and staged gates
   cover R1 without stopping traffic.
 
-  Drain, retirement, and rollback (g1, g4, g5, T2): pre-activation work can live
-  for 10 minutes, so the old path is drained for at least 10 minutes. E's code
-  remains present but inactive through the 24-hour observation window. A rollback
-  disables dependents before prerequisites: {A,B,C}->{B,C}->{C}->{}->{E}.
-  Re-enabling E before C is off would violate C's exclusion; disabling C before B
-  would violate B -> C. Only after the observation window can E be retired.
+  Drain, retirement, and rollback (g1, g4, g5, T2): after E admissions stop,
+  A/B/C may activate while admitted E work drains for up to 10 minutes. Because
+  the E and A/B/C envelopes are incompatible, versioned API compatibility is
+  required on the same mixed fleets until that drain ends; silently parsing one
+  envelope as the other would corrupt requests. E's handler remains present but
+  inactive through the 24-hour observation window. A rollback disables dependents
+  before prerequisites: {A,B,C}->{B,C}->{C}->{}->{E}. Re-enabling E before C is
+  off would violate C's exclusion; disabling C before B would violate B -> C.
+  Only after the observation window can the E handler be retired.
 
   Decoy proof (T3): D -> A constrains D only if D is activated. Since D is not in
   the target, the parsimonious valid trace omits it. Reversing the arrow and

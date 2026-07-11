@@ -6,7 +6,7 @@
 instance_id: firmware-ota-fleet-001
 domain: device-fleet
 difficulty: hard
-version: "0.2.0"
+version: "0.3.0"
 split: public
 
 problem_statement: |

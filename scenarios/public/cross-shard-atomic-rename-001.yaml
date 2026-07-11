@@ -23,9 +23,12 @@ problem_statement: |
 
   Cross-shard renames are modest: at most 50/second, with at most four
   participants each. Every participant and the coordinator can sustain 2,000
-  fsync-backed metadata WAL records/second. All are in one metro region: p99
-  request/response RTT is 2 ms and a p99 WAL fsync is 4 ms. The p99 rename
-  budget is 120 ms in healthy operation.
+  fsync-backed metadata WAL records/second. A certified production-like
+  benchmark of the exact four-participant durable 2PC path—including lock
+  acquisition, coordinator and participant WAL fsyncs, both message rounds,
+  scheduling, and response serialization—establishes an end-to-end p99 upper
+  bound of 70 ms at every admitted load up to 100 renames/second. The healthy-
+  operation p99 budget is 120 ms.
 
   During a partition, availability is not required: a rename may block or
   return retryable-unavailable for up to the 30-second coordinator recovery
@@ -53,7 +56,7 @@ constraints:
     value: "an acknowledged outcome survives coordinator and participant crashes; an in-doubt participant must not invent or forget the decision"
   - id: C3
     type: latency
-    value: "healthy-operation rename p99 <= 120 ms; at most 50 renames/s, four participants, 2 ms p99 RTT, 4 ms p99 WAL fsync, 2,000 WAL records/s capacity per node"
+    value: "healthy-operation rename p99 <= 120 ms at 50 renames/s; the exact durable four-participant 2PC path has a measured end-to-end p99 upper bound of 70 ms through 100 renames/s, and each node sustains 2,000 WAL records/s"
   - id: C4
     type: availability
     value: "rename availability during a partition is not required; affected rows may block for up to the 30-second recovery objective, while unrelated metadata remains available"
@@ -136,10 +139,6 @@ gold:
     requirement: R3
     acceptable: [idempotency-keys, exactly-once-processing]
   - id: g9
-    dimension: tradeoff_selection
-    check: pattern_forbidden
-    forbidden: [saga]
-  - id: g10
     dimension: parsimony
     check: parsimony
     max_patterns: 6
@@ -154,11 +153,20 @@ traps:
   - id: T2
     description: Hold a distributed lease, perform the four local writes sequentially, and rely on the lease to prevent competing renames.
     violated_constraint_id: C2
-    why_attractive: Mutual exclusion appears to turn the operation into one critical section. A crash after two writes leaves durable partial state, and lease expiry lets another owner proceed without knowing the first outcome. A lock is not an atomic commit record.
+    why_attractive: >
+      Mutual exclusion appears to turn the operation into one critical section.
+      A crash after two writes leaves durable partial state, and lease expiry
+      lets another owner proceed without knowing the first outcome. A lock is
+      not an atomic commit record.
   - id: T3
     description: Reject 2PC categorically because it can block, and choose an available eventually consistent protocol.
     violated_constraint_id: C4
-    why_attractive: The usual distributed-systems warning is correct when partition availability is required. C4 explicitly permits affected operations to block during the 30-second recovery window, while C1 forbids the partial visibility of the nonblocking alternatives. In this workload, blocking is the priced-in tradeoff.
+    why_attractive: >
+      The usual distributed-systems warning is correct when partition
+      availability is required. C4 explicitly permits affected operations to
+      block during the 30-second recovery window, while C1 forbids the partial
+      visibility of the nonblocking alternatives. In this workload, blocking is
+      the priced-in tradeoff.
 
 twist:
   description: >
@@ -166,14 +174,14 @@ twist:
     2PC is the correct mechanism: strict non-compensable atomicity, low volume,
     ample latency headroom, local participants, and no partition-progress goal.
   invalidated_canonical: >
-    "Never use 2PC; use a saga" fails g1, g6, and g9. The saga's availability
+    "Never use 2PC; use a saga" fails g1 and g6. The saga's availability
     advantage is not requested, while its observable intermediate states are
-    explicitly forbidden. Durable prepare and decision WAL make 2PC's uncertain
+    ruled out by C1. Durable prepare and decision WAL make 2PC's uncertain
     states recoverable under the allowed blocking window.
-  twist_gold_refs: [g1, g6, g9]
+  twist_gold_refs: [g1, g6]
 
 gold_rationale: |
-  Protocol choice (g1, g6, g9, T1): C1 requires one decision shared by up to
+  Protocol choice (g1, g6, T1): C1 requires one decision shared by up to
   four independently transactional shards. Sequential updates expose partial
   state; a saga exposes it and later compensates it. Neither satisfies atomic
   visibility. Durable 2PC first obtains prepared yes votes from every
@@ -181,16 +189,16 @@ gold_rationale: |
   participants to expose that decision. Its known blocking failure mode is
   permitted by C4, so rejecting it by slogan answers a different problem.
 
-  Healthy-path arithmetic (C3): all participants act in parallel, so four
-  participants do not multiply critical-path latency. A conservative path is:
-  coordinator intent fsync 4 ms + prepare round trip and participant fsync
-  (2+4=6 ms) + coordinator decision fsync 4 ms + terminal round trip and
-  participant fsync (2+4=6 ms) = 20 ms. Even reserving 40 ms for lock acquisition,
-  scheduling, and application work gives 60 ms, half the 120 ms budget. At
-  50 transactions/s, each involved participant appends at most a prepare and a
-  terminal record per transaction: 100 WAL records/s, 5% of its 2,000/s
-  capacity. The coordinator likewise writes at most about 100/s. Thus the
-  blocking/overhead objection is not supported by this workload.
+  Healthy path (C3): the supplied end-to-end bound measures the complete exact
+  protocol rather than adding component percentiles: four participants, locks,
+  coordinator and participant WAL fsyncs, both message rounds, scheduling, and
+  serialization are all inside the observed p99 <= 70 ms at every admitted load
+  through 100 renames/s. Required load is only 50/s, and 70 ms < the 120 ms
+  budget, leaving 50 ms of stated headroom. The throughput cross-check agrees:
+  each involved participant appends at most a prepare and terminal record per
+  transaction, so even a shard involved in all 50 renames sees 100 WAL records/s,
+  5% of its 2,000/s capacity. The coordinator likewise writes at most about
+  100/s. No inference from sums of component p99 values is required.
 
   Durable state machine (g2-g4, g7, T2): before voting yes, a participant fsyncs
   the transaction id, request id, proposed mutations, and retained row locks in
@@ -206,4 +214,3 @@ gold_rationale: |
   messages idempotently. Starting a fresh transaction could apply both quota
   deltas twice after a lost response; rejecting every retry would leave the
   client unable to learn an already committed result.
-

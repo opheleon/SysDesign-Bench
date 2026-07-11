@@ -5,7 +5,7 @@
 instance_id: config-delivery-001
 domain: platform-infra
 difficulty: medium
-version: "0.2.0"
+version: "0.3.0"
 split: public
 
 problem_statement: |

@@ -76,12 +76,23 @@ model's **format-compliance rate** (how often its spec validated) reported along
 ## Quickstart
 
     pip install -e ".[run]"          # plain `pip install -e .` suffices for grading only
-    sdbench run --model <litellm-model-id>   # → predictions.jsonl (the only step needing API keys)
-    sdbench grade predictions.jsonl          # → scores.json (pure Python, no LLM calls)
+    sdbench run --model <litellm-model-id> --scenarios scenarios/public   # → predictions.jsonl
+    sdbench grade predictions.jsonl --scenarios scenarios/public          # → scores.json
     sdbench report scores.json               # → markdown leaderboard + failed-item detail
 
 Protocol: temperature 0, pass@1, canonical prompt template, N-run variance reported.
-Grading makes zero LLM calls; only `run` needs API keys.
+Grading makes zero LLM calls; only `run` needs API keys. Always pass the public
+scenario path for publishable runs: the CLI's generic default recursively includes
+the local, gitignored held-out split.
+
+## Dataset status
+
+Version 0.3.0 contains **50 scenarios**: 38 public and 12 held-out. The v0.2
+expansion contributed 22 scenarios (16 public and 6 held-out); v0.3 adds 20
+more (14 public and 6 held-out) across coordination, causal and bitemporal
+semantics, recovery, observability, scheduling, cryptographic membership,
+ML correctness, and probabilistic latency. Held-out YAML is intentionally
+gitignored and must be backed up in a private store.
 
 ## Baseline results (v0.1 pilot — 8 public scenarios)
 
@@ -107,8 +118,9 @@ Calibration note: after the first pilot pass, 2 of 76 items were re-authored
 (a role-taxonomy synonym the gold set didn't accept; two parsimony caps set
 below the entailed pattern count) and all predictions were **re-graded, not
 re-run** — the decoupled predictions/grading flow exists exactly for this.
-Item validation status: single-author scenarios with worked `gold_rationale`
-math; independent second review is the bar for v0.2.
+Item validation status: v0.1 pilot results are retained for historical
+comparability. New v0.2/v0.3 items require independent proof review and a
+multi-model discrimination pilot before a new baseline table is published.
 
 ## What we consciously don't measure
 

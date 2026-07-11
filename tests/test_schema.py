@@ -41,6 +41,20 @@ class TestCatalogs:
         missing = needed - catalogs.pattern_ids
         assert not missing, f"pattern catalog missing: {sorted(missing)}"
 
+    def test_v03_catalog_additions_exist(self, catalogs: Catalogs):
+        patterns = {
+            "fencing-tokens", "version-guarded-writes",
+            "failure-domain-aware-placement", "consistent-cut-snapshot",
+            "bitemporal-model", "tail-based-sampling", "point-in-time-join",
+            "gang-scheduling",
+        }
+        missing_info = {
+            "server_trust_model", "membership_revocation_scope",
+            "privacy_unit", "privacy_budget_definition",
+        }
+        assert patterns <= catalogs.pattern_ids
+        assert missing_info <= catalogs.missing_info_ids
+
 
 class TestScenario:
     def test_proof_scenario_parses(self, proof_scenario: Scenario):

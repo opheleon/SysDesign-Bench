@@ -1,0 +1,194 @@
+# Offline correctness is not "join by event timestamp": late arrivals and
+# retroactive corrections require the training row to reproduce what the online
+# path could actually know at prediction time, under the transform version then
+# deployed.
+instance_id: point-in-time-feature-store-001
+domain: machine-learning-platform
+difficulty: hard
+version: "0.3.0"
+split: public
+
+problem_statement: |
+  A fraud model uses a card's one-hour spend at prediction time. Training runs
+  days later, after late transactions, corrections, and source backfills have
+  arrived. For each historical label at time L, the training feature must equal
+  the value the online system could have produced at L. A fact with an earlier
+  business-effective time but a later availability time is future information
+  and must not enter that row.
+
+  Source corrections are retroactive: they can change the value effective at a
+  past business time, but the platform must still reproduce both what was known
+  before the correction and what is considered correct after it. Feature
+  transforms also evolve independently of model-training runs.
+
+  Design source history, point-in-time training joins, transformation
+  versioning, and an online/offline parity gate.
+
+context: |
+  Use this audit fixture for a card labeled at 10:00. Its one-hour window starts
+  at 09:00.
+
+  - E1: $400 effective at 09:30, available to features at 09:31.
+  - E2: $700 effective at 09:59, delayed and available at 10:03.
+  - C1: at 11:00, a correction says E1 was actually $40, effective at 09:30;
+    it supersedes E1 only for knowledge times at or after 11:00.
+
+  Therefore the online feature at 10:00 was $400. A next-day join using only
+  effective time against current corrected history sees $40 + $700 = $740.
+
+  Transform v7 was active at 10:00. Transform v8 deployed at 10:30 and clips
+  the one-hour sum to $500. Both versions must remain reproducible. Before a
+  model release, the platform can replay one million captured prediction cuts;
+  the release gate requires zero online/offline feature-vector mismatches.
+
+constraints:
+  - id: C1
+    type: consistency
+    value: "a training row at label time L may use only source versions effective by L and available to the online feature path by L"
+  - id: C2
+    type: compliance
+    value: "late corrections and backfills never destroy the ability to reproduce what was known at any earlier prediction time"
+  - id: C3
+    type: durability
+    value: "the exact transformation version active for a historical prediction remains immutable and replayable"
+  - id: C4
+    type: compliance
+    value: "model release requires zero mismatches across one million replayed online/offline feature vectors"
+
+requirements:
+  - id: R1
+    text: Training joins exclude facts that were not yet available at each label time, even when their effective timestamps are earlier.
+  - id: R2
+    text: Corrections preserve both valid-time history and the sequence of knowledge-time versions instead of overwriting prior knowledge.
+  - id: R3
+    text: Each historical row binds to the immutable transform version that was active for that prediction.
+  - id: R4
+    text: Online and offline computation share versioned feature semantics and are checked by the million-row replay parity gate.
+
+flows:
+  - id: source_history
+    description: Recording late arrivals and retroactive corrections.
+    decision_slots:
+      versioning: [overwrite-effective-row-on-correction, append-valid-and-knowledge-time-version]
+  - id: training_materialization
+    description: Selecting source facts for a label at time L.
+    decision_slots:
+      as_of_rule: [effective-time-only-against-current-history, effective-and-availability-time-as-of-label]
+  - id: transform_execution
+    description: Selecting feature logic and proving online/offline equivalence.
+    decision_slots:
+      version_policy: [recompute-all-history-with-current-transform, bind-transform-version-active-at-prediction-time]
+      parity_policy: [separate-online-and-offline-implementations-with-code-review, shared-versioned-definition-with-million-row-zero-diff-gate]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: source_history
+    slot: versioning
+    acceptable: [append-valid-and-knowledge-time-version]
+  - id: g2
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: training_materialization
+    slot: as_of_rule
+    acceptable: [effective-and-availability-time-as-of-label]
+  - id: g3
+    dimension: migration_safety
+    check: slot_match
+    flow: transform_execution
+    slot: version_policy
+    acceptable: [bind-transform-version-active-at-prediction-time]
+  - id: g4
+    dimension: operability
+    check: slot_match
+    flow: transform_execution
+    slot: parity_policy
+    acceptable: [shared-versioned-definition-with-million-row-zero-diff-gate]
+  - id: g5
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [point-in-time-join]
+  - id: g6
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [bitemporal-model]
+  - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [temporal-audit-log]
+  - id: g8
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
+    acceptable: [data-verification-reconciliation]
+  - id: g9
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 7
+
+traps:
+  - id: T1
+    description: Join every training label to the latest corrected records whose effective timestamps are at or before the label.
+    violated_constraint_id: C1
+    why_attractive: Using corrected event-time truth sounds more accurate and is the standard analytical as-of join. For the supplied 10:00 cut it includes E2, which was unavailable until 10:03, and the $40 correction not known until 11:00, producing $740 instead of the online system's $400. That is future leakage, not improved data quality.
+  - id: T2
+    description: Recompute every historical row with today's transform so the training dataset has one uniform feature definition.
+    violated_constraint_id: C3
+    why_attractive: A single current transform simplifies backfills and removes old code. But v8 did not exist at 10:00; it would clip the current-history $740 to $500, while the actual v7 prediction saw $400. Neither the historical prediction nor its model behavior can then be reproduced.
+  - id: T3
+    description: Maintain hand-written online and offline implementations and rely on code review to keep their formulas equivalent.
+    violated_constraint_id: C4
+    why_attractive: Serving and batch engines have different performance needs, so duplicate native implementations look practical. Tiny differences in windows, null handling, and correction order are exactly the training-serving skew the zero-difference gate forbids. A shared versioned definition compiled/executed in both paths plus replay comparison makes parity testable.
+
+twist:
+  description: >
+    "Historically correct" has two independent clocks. Corrected business truth
+    is not necessarily information the model could know at the historical
+    prediction, and current feature code is not necessarily the code that made
+    that prediction.
+  invalidated_canonical: >
+    The ordinary event-time as-of join and latest-table backfill fail g1 and g2
+    by importing E2 and C1 into the 10:00 row. Recomputing with the newest
+    transform and trusting separate serving/batch implementations fail g3 and
+    g4. The design must bind both source knowledge time and transform version to
+    the prediction cut.
+  twist_gold_refs: [g1, g2, g3, g4]
+
+gold_rationale: |
+  Two-clock source state (g1, g2, g5, g6, T1): effective time answers when a
+  fact was true in the business domain; availability/knowledge time answers
+  when the feature system could use that version. A correction is appended with
+  its original valid time and its new knowledge interval, closing only the
+  prior version's knowledge interval. It does not rewrite the earlier snapshot.
+  For a label L the point-in-time join admits a source version only when its
+  valid/effective time is relevant to L AND its availability time is <= L,
+  then chooses the version visible at that knowledge cut.
+
+  The fixture proves the result without judgment: at 10:00, E1 ($400) is
+  effective and available. E2 is effective at 09:59 but 10:03 > 10:00, so it
+  is future information. C1 is effective at 09:30 but 11:00 > 10:00, so the
+  pre-correction $400 version remains the one then visible. The feature is
+  exactly $400. Event-time-only current truth instead selects corrected E1
+  ($40) plus E2 ($700) = $740, a $340 leakage error.
+
+  Transform reproducibility (g3, g7, T2): the training row records and invokes
+  v7, which was active at prediction time, from an immutable transformation
+  registry/audit history. Applying v8 retroactively changes semantics (and can
+  turn the leaked $740 into clipped $500); preserving only source timestamps is
+  therefore insufficient. Source cut, transformation version, and model input
+  must all be replayable as one historical artifact.
+
+  Parity (g4, g8, T3): a shared versioned feature definition prevents deliberate
+  formula drift, while replaying one million captured prediction cuts through
+  both execution engines detects engine-specific windowing, null, and ordering
+  differences. C4 says zero mismatches, so any nonzero diff blocks release and
+  is reconciled. Code review alone is neither exhaustive nor a measured parity
+  result.

@@ -4,7 +4,7 @@
 instance_id: quoting-engine-flaky-feed-001
 domain: market-quoting
 difficulty: hard
-version: "0.1.0"
+version: "0.3.0"
 split: public
 
 problem_statement: |

@@ -52,7 +52,6 @@ class ConstraintType(str, Enum):
     DURABILITY = "durability"
     BUDGET = "budget"
     COMPLIANCE = "compliance"
-    SECURITY = "security"
     TEAM = "team"
     TOPOLOGY = "topology"
     NETWORK = "network"

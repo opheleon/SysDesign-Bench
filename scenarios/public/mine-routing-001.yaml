@@ -5,7 +5,7 @@
 instance_id: mine-routing-001
 domain: industrial-routing
 difficulty: medium
-version: "0.1.0"
+version: "0.3.0"
 split: public
 
 problem_statement: |

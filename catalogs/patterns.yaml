@@ -398,7 +398,7 @@ patterns:
   - id: fencing-tokens
     name: Fencing tokens
     category: reliability
-    description: Monotonically increasing ownership epochs accompany writes; sinks reject epochs older than the highest accepted, blocking a paused former lease holder.
+    description: Monotonically increasing ownership epochs accompany writes; granting a new epoch advances the sink's current-authority fence, and the sink rejects every older epoch even before the new owner writes.
   - id: version-guarded-writes
     name: Version-guarded writes
     category: reliability

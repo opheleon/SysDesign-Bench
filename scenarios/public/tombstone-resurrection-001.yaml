@@ -15,7 +15,7 @@ problem_statement: |
   replica may be unavailable without stopping writes.
 
   The service holds 50 billion keys and processes 20 million deletes/day. A
-  tombstone is 32 bytes. The fixed tombstone budget is 10 GB/replica, so the
+  tombstone is 32 bytes. The fixed tombstone budget is 9 GB/replica, so the
   existing collector removes tombstones after 14 days:
 
       20M deletes/day x 32 B x 14 days = 8.96 GB.
@@ -42,7 +42,7 @@ context: |
   most 18 hours over reserved recovery bandwidth. The rejoin objective is 24
   hours, so destructive bootstrap fits. Keeping 45 days of tombstones would
   require 28.8 GB/replica, and keeping tombstones indefinitely would add about
-  233.6 GB/replica/year; neither fits the fixed 10 GB budget. Wall clocks may
+  233.6 GB/replica/year; neither fits the fixed 9 GB budget. Wall clocks may
   skew by up to 500 ms, and process pauses are unbounded.
 
 constraints:
@@ -51,7 +51,7 @@ constraints:
     value: "once a delete is acknowledged by the online write quorum, the deleted value must never be resurrected"
   - id: C2
     type: budget
-    value: "tombstone metadata is capped at 10 GB/replica; 20M deletes/day at 32 B each permits at most 14 days of retention (8.96 GB)"
+    value: "tombstone metadata is capped at 9 GB/replica; 20M deletes/day at 32 B each permits at most 14 days of retention (8.96 GB; 15 days would be 9.6 GB)"
   - id: C3
     type: durability
     value: "a returning replica may be older than both the 14-day tombstone horizon and the 30-day mutation-log horizon; surviving local disks are not trusted as current"
@@ -65,7 +65,7 @@ requirements:
   - id: R2
     text: Restore a replica older than the retained delete history without importing any of its stale local records.
   - id: R3
-    text: Reclaim tombstones within the fixed 10 GB per-replica metadata budget.
+    text: Reclaim tombstones within the fixed 9 GB per-replica metadata budget.
   - id: R4
     text: Keep the two healthy regions writable while the isolated or rebuilding replica is unavailable.
 
@@ -134,10 +134,6 @@ gold:
     requirement: R4
     acceptable: [quorum-writes]
   - id: g9
-    dimension: tradeoff_selection
-    check: pattern_forbidden
-    forbidden: [last-write-wins]
-  - id: g10
     dimension: parsimony
     check: parsimony
     max_patterns: 7
@@ -146,16 +142,29 @@ traps:
   - id: T1
     description: Let C rejoin ordinary LWW anti-entropy because its value has an older timestamp than the day-2 delete.
     violated_constraint_id: C1
-    why_attractive: LWW would reject C's value if the tombstone still existed, so the timestamp argument sounds correct. On day 45 the tombstone and replay log are both gone; A and B expose absence, which supplies no winning timestamp. Copying C's only extant record therefore recreates K. Conflict resolution cannot compare against evidence that was collected.
+    why_attractive: >
+      LWW would reject C's value if the tombstone still existed, so the timestamp
+      argument sounds correct. On day 45 the tombstone and replay log are both
+      gone; A and B expose absence, which supplies no winning timestamp. Copying
+      C's only extant record therefore recreates K. Conflict resolution cannot
+      compare against evidence that was collected.
   - id: T2
     description: Prevent resurrection by retaining every tombstone until every old replica returns, potentially forever.
     violated_constraint_id: C2
     why_attractive: >
-      Never forgetting deletes is mechanically safe and avoids membership generations. The arithmetic rules it out: 45 days already needs 20M x 32 B x 45 = 28.8 GB, 2.88 times the cap, and indefinite retention grows by 233.6 GB each year per replica.
+      Never forgetting deletes is mechanically safe and avoids membership
+      generations. The arithmetic rules it out: 45 days already needs
+      20M x 32 B x 45 = 28.8 GB, 3.2 times the cap, and indefinite retention
+      grows by 233.6 GB each year per replica.
   - id: T3
     description: Give C a fresh generation but incrementally replay the retained 30-day log over its surviving disk.
     violated_constraint_id: C3
-    why_attractive: Generation fencing sounds like it makes the old disk safe, while incremental catch-up is much faster than copying 24 TB. But K's day-2 delete is 43 days old at rejoin and is absent from the 30-day log. Relabeling stale records with a new generation converts them into accepted stale records; the old disk must be discarded.
+    why_attractive: >
+      Generation fencing sounds like it makes the old disk safe, while
+      incremental catch-up is much faster than copying 24 TB. But K's day-2
+      delete is 43 days old at rejoin and is absent from the 30-day log.
+      Relabeling stale records with a new generation converts them into accepted
+      stale records; the old disk must be discarded.
 
 twist:
   description: >
@@ -164,16 +173,17 @@ twist:
     whether an obsolete replica is allowed to contribute evidence at all.
   invalidated_canonical: >
     "Attach timestamps, keep tombstones for a while, then run anti-entropy" fails
-    g1-g4 and g9 once both the tombstone and log entry are gone. Safety requires
+    g1-g4 once both the tombstone and log entry are gone. Safety requires
     advancing a durable membership generation, rejecting the retired generation
     at every sink, and treating the old disk as an untrusted cache that must be
     replaced before admission.
-  twist_gold_refs: [g1, g2, g3, g4, g9]
+  twist_gold_refs: [g1, g2, g3, g4]
 
 gold_rationale: |
   Retention arithmetic (g4, g7, T2): one day of tombstones is
   20,000,000 x 32 B = 640,000,000 B. Fourteen days is 8.96 GB and fits the
-  10 GB cap; 45 days is 28.8 GB and does not. Tombstone retention therefore
+  9 GB cap; 15 days is 9.6 GB and does not, so 14 days is the largest whole-day
+  horizon. Forty-five days is 28.8 GB and also does not fit. Tombstone retention therefore
   cannot be stretched to cover C's outage. TTL is safe only after a membership
   generation makes pre-horizon replicas permanently inadmissible.
 
@@ -198,4 +208,3 @@ gold_rationale: |
   Availability (g8): A and B already form the write quorum, so fencing and
   rebuilding C does not stop acknowledged writes. Quorum operation covers R4;
   reconciliation-on-reconnect covers the destructive verified bootstrap in R2.
-

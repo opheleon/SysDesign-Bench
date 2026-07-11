@@ -6,6 +6,7 @@ predictions file written by the runner (fake model) — zero LLM calls.
 import json
 
 from sdbench.cli import main
+from sdbench.providers import Completion, Usage
 from sdbench.runner import run_scenarios, write_predictions
 
 from conftest import CATALOG_DIR, SCENARIO_DIR
@@ -15,7 +16,7 @@ from factories import infeasible_gold_spec
 def _write_predictions(path, catalogs, proof_scenario, response_json):
     records = run_scenarios(
         [proof_scenario], catalogs, "fake-model",
-        complete_fn=lambda model, messages, temperature: response_json,
+        complete_fn=lambda messages: Completion(text=response_json, usage=Usage()),
     )
     write_predictions(records, path)
 

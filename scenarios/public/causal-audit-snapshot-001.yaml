@@ -10,12 +10,12 @@ split: public
 problem_statement: |
   An order workflow spans three independently stored services:
 
-  Orders commits an order and an outbox event. Billing consumes that event,
-  commits a charge and its outbox event. Fulfillment consumes the billing event
-  and commits a reservation. Kafka preserves order within each partition, but
-  messages may be delayed in brokers or outboxes. Each service has multiple
-  input partitions and its own database clock; observed clock skew is up to 8
-  seconds.
+  Orders consumes a partitioned order-command log, then commits an order and an
+  outbox event. Billing consumes that event, commits a charge and its outbox
+  event. Fulfillment consumes the billing event and commits a reservation.
+  Kafka preserves order within each partition, but messages may be delayed in
+  brokers or outboxes. Each service has multiple input partitions and its own
+  database clock; observed clock skew is up to 8 seconds.
 
   Compliance needs an exact audit report that corresponds to one possible
   global state. The causal invariants are strict: a reported charge must include
@@ -25,12 +25,13 @@ problem_statement: |
   events/second; globally pausing services or opening a transaction across their
   databases is not allowed.
 
-  Kafka supports barrier records. A consumer can stop a partition when its
-  barrier arrives, wait until barriers have arrived on all of its inputs, commit
-  a local MVCC snapshot marker with consumed offsets, emit downstream barriers
-  after all pre-barrier outbox records, and then release post-barrier records.
-  Design how an audit cut is initiated, captured at each service, propagated,
-  and assembled.
+  Kafka supports barrier records. The coordinator can append the initial barrier
+  to every root order-command partition. A consumer can stop a partition when
+  its barrier arrives, wait until barriers have arrived on all of its inputs,
+  commit a local MVCC snapshot marker with consumed offsets, emit downstream
+  barriers after all pre-barrier outbox records, and then release post-barrier
+  records. Design how an audit cut is initiated, captured at each service,
+  propagated, and assembled.
 
 context: |
   Service state changes and consumed offsets commit atomically in each local

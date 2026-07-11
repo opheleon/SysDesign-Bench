@@ -19,8 +19,8 @@ problem_statement: |
   failed protection must be restored within 24 hours.
 
   Foreground reads have a hard p99 <= 25 ms. Tests show that, when foreground
-  traffic has strict priority and repair draws no more than 0.25 Gb/s from
-  each of the 48 surviving source nodes, p99 stays below 22 ms. A line-rate
+  traffic has strict priority and repair draws no more than 0.26 Gb/s from
+  each of the 47 surviving source nodes, p99 stays below 22 ms. A line-rate
   rebuild drives p99 above 80 ms. Clients time out at 30 ms and may otherwise
   make three attempts. Storage heartbeats share those NICs and are sampled
   every two seconds.
@@ -33,7 +33,7 @@ context: |
   Repair work is divisible into independently checkpointed stripe ranges, so
   its rate can be changed without restarting the rebuild. The controller sees
   remaining bytes, time to deadline, foreground p99, NIC queue depth, retry
-  rate, and out-of-band rack-power health. The 48 surviving nodes share repair
+  rate, and out-of-band rack-power health. The 47 surviving nodes share repair
   source work uniformly when shards were placed in distinct rack domains.
 
 constraints:
@@ -42,7 +42,7 @@ constraints:
     value: "reconstruct 12 TB under the measured 9x network cost plus 20% planning margin within 24 hours"
   - id: C2
     type: latency
-    value: "foreground read p99 <= 25 ms during repair; tests validate <= 0.25 Gb/s repair draw per surviving source when foreground is prioritized"
+    value: "foreground read p99 <= 25 ms during repair; tests validate <= 0.26 Gb/s repair draw per surviving source when foreground is prioritized"
   - id: C3
     type: availability
     value: "repair-induced latency must not create unbounded client retry amplification or evict saturated-but-live nodes after three delayed heartbeats"
@@ -172,9 +172,9 @@ gold_rationale: |
 
       129.6 TB * 8 / 86,400 s = 12 Gb/s.
 
-  With uniform repair sources that is 12 / 48 = 0.25 Gb/s per surviving node,
-  exactly the tested limit that retains p99 below 22 ms when foreground work
-  has priority. The 4.8 Gb/s option needs 129.6 TB * 8 / 4.8 Gb/s = 216,000 s
+  With uniform repair sources that is 12 / 47 = 0.2554 Gb/s per surviving node,
+  below the tested 0.26 Gb/s limit that retains p99 below 22 ms when foreground
+  work has priority. The 4.8 Gb/s option needs 129.6 TB * 8 / 4.8 Gb/s = 216,000 s
   = 60 hours and violates C1. Unbounded line-rate repair violates C2. Therefore
   the controller must continuously recompute remaining-work / remaining-time
   as its nonzero floor, give foreground work strict priority, and use latency

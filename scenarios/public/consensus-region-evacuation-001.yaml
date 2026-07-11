@@ -55,8 +55,10 @@ requirements:
   - id: R1
     text: Place the final five voters so any one target region can fail without losing quorum.
   - id: R2
-    text: Change a majority of voter identities without admitting disjoint commit quorums or uncaught voters.
+    text: Admit C2, D1, and D2 as voters only after each learner durably matches the committed log.
   - id: R3
+    text: Change a majority of voter identities while every commit intersects majorities of both old and new configurations.
+  - id: R4
     text: Keep the old hosts recoverable until the new configuration is durably finalized.
 
 flows:
@@ -114,13 +116,18 @@ gold:
     dimension: requirements_coverage
     check: coverage
     requirement: R2
-    acceptable: [quorum-writes, data-verification-reconciliation]
+    acceptable: [data-verification-reconciliation]
   - id: g6
     dimension: requirements_coverage
     check: coverage
     requirement: R3
-    acceptable: [rollback-plan]
+    acceptable: [quorum-writes]
   - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
+    acceptable: [rollback-plan]
+  - id: g8
     dimension: parsimony
     check: parsimony
     max_patterns: 6
@@ -162,9 +169,11 @@ gold_rationale: |
   durably apply through the leader's committed index and report its match index
   before promotion. This preserves all committed entries even if a replacement
   participates immediately in the next quorum. Merely starting snapshot transfer
-  supplies neither completeness nor durability.
+  supplies neither completeness nor durability. Reconciliation/verification of
+  the durable match index covers this admission fact only; it does not prove
+  quorum intersection during the subsequent membership change.
 
-  Joint-consensus safety (g3, g5, T1): old O={A1,A2,B1,B2,C1}; new
+  Joint-consensus safety (g3, g6, T1): old O={A1,A2,B1,B2,C1}; new
   N={B1,C1,C2,D1,D2}. Direct installation is unsafe because O can commit with
   {A1,A2,B2} while N commits with disjoint {C2,D1,D2}. In the joint phase every
   entry needs three votes from O AND three from N, so no entry can be committed
@@ -177,7 +186,7 @@ gold_rationale: |
   B1+D1+D2=3. After loss of D, O retains 5 and N retains B1+C1+C2=3. Thus every
   named regional failure leaves both required majorities.
 
-  Retirement (g6): A1, A2, and B2 remain intact until the new-only configuration
+  Retirement (g7): A1, A2, and B2 remain intact until the new-only configuration
   and its committed index are durable. That rollback boundary avoids turning a
   membership typo or catch-up defect into data loss; destruction before final
   commit would remove the only replicas able to prove the old configuration.

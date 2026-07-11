@@ -1,0 +1,196 @@
+# Eight GPUs are free in aggregate but unusable for an eight-way topology-local
+# job. Checkpoint overhead and latest-start arithmetic leave exactly one offered
+# interval, and backfill is safe only before the derived reservation boundary.
+instance_id: gpu-gang-scheduler-001
+domain: compute-scheduling
+difficulty: hard
+version: "0.3.0"
+split: public
+
+problem_statement: |
+  A training cluster has four hosts. Each host has eight GPUs connected by
+  host-local NVLink; hosts communicate over ordinary Ethernet. At time t=0,
+  every host is running low-priority work on six GPUs and has two GPUs idle.
+  Thus eight GPUs are free in aggregate, but no host has eight free.
+
+  An urgent job U arrives at t=0. It needs all eight GPUs simultaneously on ONE
+  NVLink host, runs for 50 minutes once the gang starts, and must finish by
+  t=62 minutes. If spread across hosts, its measured runtime is at least 110
+  minutes. U cannot make progress from a partial allocation.
+
+  The six low-priority allocations on a chosen host are preemptible. They do I
+  minutes of useful compute between coordinated checkpoints, followed by a
+  blocking two-minute checkpoint write. At an arbitrary arrival, the worst
+  wait for a clean preemption is I+2 minutes. Policy limits checkpoint overhead
+  to at most 20%, calculated as 2/(I+2). Choose I from 5, 10, or 15 minutes.
+
+  While the reservation is pending, the chosen host's two currently idle GPUs
+  may run certified non-preemptible backfill. Job S has a hard maximum runtime
+  of 8 minutes; job L has a hard maximum of 14 minutes. The business requires
+  using safe idle capacity, but no backfill may put U's deadline at risk.
+
+  Design topology placement, gang allocation, checkpoint cadence, and
+  reservation-aware backfill.
+
+context: |
+  Checkpoint writes for the six allocations on one host are coordinated and
+  complete within the stated two minutes; storage bandwidth for them is already
+  reserved. Runtime bounds for S, L, and U are hard bounds, not estimates. Jobs
+  on the other three hosts cannot delay U once one target host is reserved.
+
+constraints:
+  - id: C1
+    type: topology
+    value: "U requires eight simultaneous GPUs on one NVLink host; cross-host placement takes >= 110 minutes"
+  - id: C2
+    type: latency
+    value: "U arrives at t=0, runs 50 minutes after gang start, and must finish by t=62; latest safe start is t=12"
+  - id: C3
+    type: budget
+    value: "low-priority checkpoint overhead 2/(I+2) must be <= 20%; offered useful-compute intervals I are 5, 10, or 15 minutes"
+  - id: C4
+    type: throughput
+    value: "admit certified-safe backfill on otherwise idle reserved-host GPUs, but never beyond U's latest safe start"
+
+requirements:
+  - id: R1
+    text: Reserve and start all eight of U's GPUs atomically on one NVLink host without partial-resource hold-and-wait.
+  - id: R2
+    text: Select the checkpoint interval that simultaneously satisfies the overhead ceiling and U's worst-case preemption deadline.
+  - id: R3
+    text: Backfill the reserved host only with jobs whose hard completion bound is no later than t=12.
+
+flows:
+  - id: job_placement
+    description: Physical placement of U's eight workers.
+    decision_slots:
+      topology: [any-eight-free-gpus-across-cluster, one-eight-gpu-nvlink-host]
+  - id: gang_admission
+    description: Acquiring U's resources while other jobs occupy each host.
+    decision_slots:
+      allocation: [incremental-hold-gpus-until-eight, atomic-eight-gpu-reservation-and-coordinated-start]
+  - id: preemption
+    description: Checkpoint cadence of the low-priority occupants that may be preempted.
+    decision_slots:
+      useful_compute_interval: [five-minutes, ten-minutes, fifteen-minutes]
+  - id: reserved_host_backfill
+    description: Use of the two idle GPUs on U's selected host before its latest start.
+    decision_slots:
+      policy: [disable-all-backfill, admit-any-job-that-fits-two-gpus, admit-only-hard-max-completion-by-twelve]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: job_placement
+    slot: topology
+    acceptable: [one-eight-gpu-nvlink-host]
+  - id: g2
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: gang_admission
+    slot: allocation
+    acceptable: [atomic-eight-gpu-reservation-and-coordinated-start]
+  - id: g3
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: preemption
+    slot: useful_compute_interval
+    acceptable: [ten-minutes]
+  - id: g4
+    dimension: operability
+    check: slot_match
+    flow: reserved_host_backfill
+    slot: policy
+    acceptable: [admit-only-hard-max-completion-by-twelve]
+  - id: g5
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [gang-scheduling]
+  - id: g6
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [checkpoint-resume]
+  - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [admission-control]
+  - id: g8
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 6
+
+traps:
+  - id: T1
+    description: Treat the two free GPUs on each of four hosts as one available pool of eight and start U across hosts or allocate them incrementally.
+    violated_constraint_id: C1
+    why_attractive: >
+      Aggregate free-GPU count is the usual bin-packing signal and says 8/8
+      capacity is available immediately. But U needs NVLink locality and has no
+      partial progress: the spread placement runs for at least 110 minutes,
+      while incremental holds cannot form a valid gang. One host must be
+      selected, its existing two GPUs reserved, and its six occupants preempted
+      as one atomic plan.
+  - id: T2
+    description: Checkpoint every five minutes to minimize the time U waits for preemption.
+    violated_constraint_id: C3
+    why_attractive: >
+      The shortest interval gives the fastest worst-case release and seems
+      safest for the urgent deadline. Each cycle is five minutes compute plus
+      two minutes blocked, so overhead is 2/7 = 28.6%, above the 20% ceiling.
+      The deadline does not authorize discarding the utilization constraint.
+  - id: T3
+    description: Backfill the reserved host's two idle GPUs with either waiting job because both fit the resource shape.
+    violated_constraint_id: C2
+    why_attractive: >
+      Work-conserving schedulers normally fill every hole, and both S and L use
+      only the two GPUs that are idle now. L's hard 14-minute run occupies them
+      past U's latest start t=12; U would then finish no earlier than t=64.
+      Resource fit without time fit breaks the deadline.
+
+twist:
+  description: >
+    The free-resource total is a false feasibility signal. Topology, atomicity,
+    checkpoint cost, and a latest-start boundary jointly determine whether the
+    urgent gang and temporary backfill can be admitted.
+  invalidated_canonical: >
+    Greedy aggregate bin packing fails g1 and g2 because eight scattered GPUs
+    are not an eight-GPU gang. "Checkpoint as often as possible" fails g3 on
+    overhead, while ordinary work-conserving backfill fails g4 by ignoring the
+    t=12 reservation boundary. The full schedule must be proved in time as well
+    as resources.
+  twist_gold_refs: [g1, g2, g3, g4]
+
+gold_rationale: |
+  Topology and atomicity (g1, g2, g5, T1): at t=0 the cluster reports eight
+  free GPUs, but the vector by host is [2, 2, 2, 2]. U's feasible placement
+  requires one entry >= 8; none exists. Using those eight across hosts changes
+  runtime from 50 to at least 110 minutes, already beyond t=62. The scheduler
+  must choose one host, reserve its two idle GPUs, arrange preemption of its six
+  occupants, and expose all eight to U in one atomic gang start. Incremental
+  hold-and-wait cannot run U and can fragment resources against competing gangs.
+
+  Checkpoint proof (g3, g6, T2): U's latest start is 62 - 50 = t=12. For each
+  offered useful-compute interval I, worst clean release is I+2 and steady
+  checkpoint overhead is 2/(I+2):
+
+  - I=5: release by t=7, but overhead 2/7 = 28.6% > 20%.
+  - I=10: release by t=12, overhead 2/12 = 16.7% <= 20%; U ends at t=62.
+  - I=15: overhead 2/17 = 11.8%, but release t=17 makes U end t=67 > 62.
+
+  Ten minutes is therefore the only offered interval satisfying both C2 and
+  C3; this is not a preference for either frequent or infrequent checkpoints.
+
+  Backfill proof (g4, g7, T3): the same latest-start calculation creates a hard
+  reservation boundary at t=12 on the selected host. S ends by t=8 and is safe.
+  L ends at t=14, delays the eight-GPU gang until at least then, and makes U end
+  at t=64. Deadline-aware admission accepts S but not L. Disabling all backfill
+  would keep the deadline but violates C4's explicit requirement to use
+  certified-safe idle capacity; generic any-fit admission violates C2.

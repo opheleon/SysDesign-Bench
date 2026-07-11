@@ -18,9 +18,9 @@ problem_statement: |
   Both facts can become known only when the relevant span or root finishes.
   The measured union of error-or-slow traces is contractually capped at 0.40%
   in a ten-minute window; overload beyond that cap is handled by a separate
-  incident mode outside this scenario. Product engineers also require a
-  representative baseline sample of normal traces using whatever quota
-  remains.
+  incident mode outside this scenario. Product engineers also require the
+  largest fixed representative sampling rate for normal traces that remains
+  safe when the interesting-trace union reaches that 0.40% maximum.
 
   A trace lasts at most 30 seconds, all spans are exported within 5 seconds of
   root completion, and one assembled trace including indexes is at most 32 KB.
@@ -34,8 +34,10 @@ context: |
   A trace crosses between 2 and 20 independently deployed services. Every
   service and collector can be changed. The long-term store bills and enforces
   quota by distinct trace ID, not span count. Hashing trace ID gives uniform
-  distribution across collectors. Decimal units are used for the capacity
-  calculation: 1 GB = 10^9 bytes and 1 KB = 10^3 bytes.
+  distribution across collectors. Normal selection uses a fixed-count,
+  hash-ranked reservoir rather than independent Bernoulli decisions, so its
+  calculated cap is a hard bound for each window. Decimal units are used for
+  the capacity calculation: 1 GB = 10^9 bytes and 1 KB = 10^3 bytes.
 
 constraints:
   - id: C1
@@ -53,13 +55,11 @@ constraints:
 
 requirements:
   - id: R1
-    text: A single trace identity follows a request end to end and all of its spans are assembled before the keep/drop decision.
+    text: A single trace identity follows a request end to end and routes all of its spans to one logical assembler.
   - id: R2
-    text: Every error-or-slow trace is retained while normal sampling consumes the largest safe remainder of the 1.00% quota.
+    text: After complete assembly, retain every error-or-slow trace and use the exact largest fixed normal-reservoir rate safe under the 0.40% interesting maximum.
   - id: R3
     text: In-flight assembly state has a proved finite residence and capacity bound with two live copies.
-  - id: R4
-    text: All spans for one trace are routed to the same logical assembler while spreading different traces uniformly.
 
 flows:
   - id: trace_correlation
@@ -71,7 +71,7 @@ flows:
     description: Choosing which complete traces enter permanent storage.
     decision_slots:
       decision_point: [one-percent-head-sample-at-root-start, independent-one-percent-per-service, tail-decision-after-trace-seal]
-      quota_policy: [retain-all-interesting-plus-one-percent-of-normal, retain-all-interesting-plus-zero-point-six-percent-of-normal, uniform-one-percent-of-all-traces]
+      quota_policy: [retain-all-interesting-plus-one-percent-of-normal, retain-all-interesting-plus-capped-0p6024096-percent-normal-reservoir, uniform-one-percent-of-all-traces]
   - id: assembly_lifecycle
     description: Bounding how long unsealed trace state remains in the assembly tier.
     decision_slots:
@@ -105,7 +105,7 @@ gold:
     check: slot_match
     flow: sampling
     slot: quota_policy
-    acceptable: [retain-all-interesting-plus-zero-point-six-percent-of-normal]
+    acceptable: [retain-all-interesting-plus-capped-0p6024096-percent-normal-reservoir]
   - id: g5
     dimension: operability
     check: slot_match
@@ -116,7 +116,7 @@ gold:
     dimension: requirements_coverage
     check: coverage
     requirement: R1
-    acceptable: [tail-based-sampling]
+    acceptable: [hash-partitioning]
   - id: g7
     dimension: requirements_coverage
     check: coverage
@@ -128,11 +128,6 @@ gold:
     requirement: R3
     acceptable: [bounded-queues]
   - id: g9
-    dimension: requirements_coverage
-    check: coverage
-    requirement: R4
-    acceptable: [hash-partitioning]
-  - id: g10
     dimension: parsimony
     check: parsimony
     max_patterns: 7
@@ -158,7 +153,7 @@ twist:
     keep a bounded mandatory union, and spend only the mathematically remaining
     quota on normal traces.
   invalidated_canonical: >
-    Canonical 1% head sampling fails g3 and g6-g7 because it decides before
+    Canonical 1% head sampling fails g3 and g7 because it decides before
     errors and end-to-end latency are known. Applying the same 1% again to
     normals fails g4. Service-local sampling and unbounded joining also fail g1,
     g2, and g5 by producing fragments or unbounded state rather than complete
@@ -166,7 +161,7 @@ twist:
   twist_gold_refs: [g1, g2, g3, g4, g5]
 
 gold_rationale: |
-  Correlation and decision timing (g1-g3, g6, g9, T1, T3): every service must
+  Correlation and decision timing (g1-g3, g6, T1, T3): every service must
   propagate one trace ID. Hashing that ID, rather than individual spans, sends
   all fragments to one logical assembly shard; a second live copy protects an
   unsealed trace. Because an error may be on the last child and the >2 s fact is
@@ -179,12 +174,18 @@ gold_rationale: |
       N = 20,000 * 600 = 12,000,000 traces.
 
   Permanent capacity is 0.01N = 120,000 traces. At the worst permitted union,
-  mandatory traces are 0.004N = 48,000, leaving at most 72,000 slots. Sampling
-  0.6% of the 11,952,000 normal traces keeps 71,712, for a total of 119,712 =
-  0.9976N. It is the largest offered safe baseline. Sampling 1% of normals
+  mandatory traces are 0.004N = 48,000, leaving exactly 72,000 slots. The
+  maximum fixed normal rate safe at that worst case is
+
+      72,000 / 11,952,000 = 0.006024096385... = 0.6024096385...%.
+
+  The offered 0.6024096% policy is that value rounded down, with the fixed-count
+  hash reservoir hard-capped at 72,000 normals, so the total cannot exceed
+  120,000. Sampling 1% of normals
   keeps 119,520 normals plus 48,000 mandatory = 167,520 = 1.396N. A uniform 1%
   total sample meets the budget but retains only about 480 of 48,000 mandatory
-  traces in expectation, so only the 0.6%-of-normal policy meets both C1 and C2.
+  traces in expectation, so only the capped residual-reservoir policy meets both
+  C1 and C2.
 
   Assembly bound (g5, g8): a root lasts at most 30 seconds and every span is
   exported within another 5 seconds, so 40 seconds is a conservative finite

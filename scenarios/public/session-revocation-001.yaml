@@ -5,7 +5,7 @@
 instance_id: session-revocation-001
 domain: auth-platform
 difficulty: hard
-version: "0.2.0"
+version: "0.3.0"
 split: public
 
 problem_statement: |

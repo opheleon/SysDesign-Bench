@@ -38,10 +38,10 @@ context: |
 
 constraints:
   - id: C1
-    type: security
+    type: compliance
     value: "KMS recovery requires a signed authorization from the live production IdP; no local, offline, hardware, vendor, or independent break-glass authentication path is allowed"
   - id: C2
-    type: security
+    type: compliance
     value: "the IdP recovery backup is decryptable only by the production KMS; no independent wrapped key, recovery image, or secondary identity root is allowed"
   - id: C3
     type: durability
@@ -49,9 +49,9 @@ constraints:
 
 requirements:
   - id: R1
-    text: Restore the KMS key database and make its keys usable after total regional loss.
+    text: Restore the KMS key database and make its keys usable within the declared disaster-recovery scope.
   - id: R2
-    text: Restore the production IdP and its identity data after total regional loss.
+    text: Restore the production IdP and its identity data within the declared disaster-recovery scope.
   - id: R3
     text: Preserve the exclusive authentication and encryption dependencies in C1 and C2 unless an explicit relaxation is selected.
 
@@ -89,11 +89,18 @@ traps:
   - id: T2
     description: Recover the IdP first, then use it to authorize KMS recovery, without changing either bootstrap rule.
     violated_constraint_id: C2
-    why_attractive: Reversing the order appears to solve T1 and identity systems are often treated as a foundational tier. Here the IdP's only backup key is inside the unavailable KMS, so the first restore cannot decrypt its input.
+    why_attractive: >
+      Reversing the order appears to solve T1 and identity systems are often
+      treated as a foundational tier. Here the IdP's only backup key is inside
+      the unavailable KMS, so the first restore cannot decrypt its input.
   - id: T3
     description: Keep the trust rules unchanged and add cross-region replicas, health checks, and an orchestrator that starts both services together.
     violated_constraint_id: C3
-    why_attractive: Replication and automation are the canonical disaster-recovery answer and reduce the probability of total loss. They do not pass the stated recovery test, whose initial condition is zero live instances. Starting both concurrently also cannot manufacture either prerequisite authorization.
+    why_attractive: >
+      Replication and automation are the canonical disaster-recovery answer and
+      reduce the probability of total loss. They do not pass the stated recovery
+      test, whose initial condition is zero live instances. Starting both
+      concurrently also cannot manufacture either prerequisite authorization.
 
 twist:
   description: >

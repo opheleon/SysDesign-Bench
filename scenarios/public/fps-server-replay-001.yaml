@@ -5,7 +5,7 @@
 instance_id: fps-server-replay-001
 domain: game-server
 difficulty: hard
-version: "0.1.0"
+version: "0.3.0"
 split: public
 
 problem_statement: |

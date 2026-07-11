@@ -24,9 +24,12 @@ problem_statement: |
   registry. Each commit receives a monotonically increasing epoch and writes a
   mutation-journal record transactionally. A committed journal record becomes
   visible to every GC/delete worker within a hard 90 minutes; worker scheduling
-  and clock margin add at most 15 minutes. An upload records each chunk under a
-  leased session before the object is accepted; sessions last at most 6 hours
-  and are roots until commit or expiry.
+  and clock margin add at most 15 minutes. An upload records each new or reused
+  chunk hash under a leased session before the object is accepted; sessions
+  last at most 6 hours and are roots until commit or expiry. Attaching a chunk
+  to a session is the per-chunk write barrier, amortized over the upload. An O(1)
+  clone may name only an existing committed root, and arbitrary re-rooting of
+  an unowned orphan hash is rejected.
 
   Garbage collection starts every 24 hours and a complete distributed
   mark/sweep takes at most 18 hours. A chunk that becomes unreachable must be
@@ -38,7 +41,9 @@ problem_statement: |
   Design collection over the shared DAG, including the root cut, concurrent
   publication protocol, resumable marking, and final deletion. Choose the
   quarantine interval from the supplied options and prove both safety and the
-  48-hour bound.
+  48-hour bound. Account for a root/session mutation that commits immediately
+  before a candidate enters quarantine but is still hidden from that delete
+  worker by the bounded journal delay.
 
 context: |
   Content hashes make chunks immutable but do not prove liveness. Manifest
@@ -72,7 +77,7 @@ requirements:
   - id: R3
     text: Quarantine an unmarked candidate and perform an authoritative reachability/protection recheck before physical deletion.
   - id: R4
-    text: Publish every post-cut root or upload reservation with a transactional protection intent that cancels quarantine before the new reference becomes visible.
+    text: Protect every post-cut reference through an existing live clone source or a transactional per-chunk upload-session intent that cancels quarantine before the reference becomes visible.
 
 flows:
   - id: root_cut
@@ -164,11 +169,22 @@ traps:
   - id: T1
     description: Maintain asynchronous per-chunk reference counts and delete a chunk immediately when its observed count reaches zero.
     violated_constraint_id: C1
-    why_attractive: Reference counting sounds tailor-made for shared content and avoids scanning 4 billion objects. Here a root commit cannot atomically update up to 10 million object-store counters, and registry events may lag 105 minutes. A count can transiently reach zero while a committed clone or upload still references the chunk; immediate deletion makes that lag irreversible.
+    why_attractive: >
+      Reference counting sounds tailor-made for shared content and avoids
+      scanning 4 billion objects. Here a root commit cannot atomically update up
+      to 10 million object-store counters, and registry events may lag 105
+      minutes. A count can transiently reach zero while a committed clone or
+      upload still references the chunk; immediate deletion makes that lag
+      irreversible.
   - id: T2
     description: Scan each root-registry shard independently while mutations continue and union whatever each worker happens to see.
     violated_constraint_id: C1
-    why_attractive: Every individual scan is accurate when it runs, and an over-approximate union feels conservative. Without one epoch, workers can combine a source root after removal with its destination clone before creation, or miss both sides across different scan times. A moving collection is not a logical state and cannot prove an unmarked object unreachable.
+    why_attractive: >
+      Every individual scan is accurate when it runs, and an over-approximate
+      union feels conservative. Without one epoch, workers can combine a source
+      root after removal with its destination clone before creation, or miss both
+      sides across different scan times. A moving collection is not a logical
+      state and cannot prove an unmarked object unreachable.
   - id: T3
     description: Use a long 12-hour quarantine to be extra safe before final deletion.
     violated_constraint_id: C4
@@ -203,16 +219,21 @@ gold_rationale: |
   chunks require partitioned batch work; durable frontier/partition checkpoints
   let failed workers resume without discarding an 18-hour pass.
 
-  Concurrent mutation proof (g4, g10): a root or session publication after E
-  writes its protection intent in the same registry transaction as the new
-  root (transactional outbox). Before visibility, the publisher checks the
-  quarantine index and cancels/quarantines protection for every newly referenced
-  subgraph root; if it cannot establish protection, publication fails and
-  retries. Mutations committed just before a quarantine transition can be
-  absent from a worker's lagging view for at most 90+15=105 minutes. Mutations
-  after the transition encounter the barrier. Thus the collector covers
-  pre-E references by the mark, racing pre-transition references by the bounded
-  journal window, and post-transition references by the publication barrier.
+  Concurrent mutation proof (g4, g10): a root or session change writes its
+  protection intent in the same registry transaction as the visible reference
+  (transactional outbox). An O(1) clone names an already-live root, whose entire
+  immutable DAG is therefore in the current mark; it cannot resurrect an
+  unowned orphan. Upload work is incremental: before accepting or reusing each
+  chunk, the service attaches its hash to the live session and checks/cancels
+  quarantine. Final root publication is O(1) because all descendants are
+  already protected by that session. If protection cannot be established, the
+  attach/publication fails and retries. A mutation committed just before a
+  quarantine transition can be absent from a delete worker's lagging view for
+  at most 90+15=105 minutes. A mutation after the transition encounters the
+  barrier. Thus the collector covers pre-E references by the mark,
+  racing pre-transition references by the bounded journal window, and
+  post-transition references by the publication barrier without walking a
+  10-million-chunk DAG on the clone request path.
 
   Deletion and exact interval (g5, g6, g9, T1, T3): sweep performs a soft state
   transition to quarantine, never immediate deletion. Two hours is 120 minutes,

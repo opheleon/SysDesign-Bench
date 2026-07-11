@@ -12,13 +12,18 @@ problem_statement: |
   compactor should publish a new manifest for a shard at a time. Workers acquire
   a 30-second lease from the shard's metadata database and renew every 10
   seconds. Compaction reads immutable input files, writes new immutable files,
-  and finally changes the authoritative manifest.
+  and finally changes the authoritative manifest. A 12 TB shard compaction takes
+  five hours. It must finish within six hours despite one owner failure after as
+  much as four hours of work; restarting from zero then would finish around hour
+  nine. Durable progress can be checkpointed every 10 minutes, and completed
+  content-addressed output chunks can be reused by the replacement.
 
   The observed failure is repeatable:
 
-  1. W1 acquires shard 7, starts a compaction, and then pauses for 90 seconds.
-  2. W1's lease expires. W2 acquires shard 7, completes a newer compaction, and
-     publishes its manifest.
+  1. W1 acquires shard 7, checkpoints through hour four, and then pauses for
+     nine hours.
+  2. W1's lease expires. W2 acquires shard 7, resumes the durable checkpoint,
+     completes the remaining work within the six-hour bound, and publishes.
   3. W1 resumes with its old process memory and attempts its final publish.
 
   Pauses can occur after any worker-side lease check and before the following
@@ -49,14 +54,15 @@ constraints:
   - id: C4
     type: other
     value: "worker clocks can skew by 5 seconds and a pause can occur between any worker-side check and write"
+  - id: C5
+    type: latency
+    value: "a 12TB compaction takes 5h and must finish within 6h despite one owner loss after up to 4h; durable checkpoints are available every 10m, while restart from zero would finish near hour 9"
 
 requirements:
   - id: R1
-    text: Fence every stale manifest mutation at the authoritative metadata sink.
+    text: Maintain automatic lease ownership and replace an expired holder without manual recovery.
   - id: R2
-    text: Make compaction retries safe without exposing or overwriting partial output.
-  - id: R3
-    text: Replace an expired owner automatically so compaction continues.
+    text: Resume a replacement from durable compaction progress and reusable immutable output so it meets the six-hour bound.
 
 flows:
   - id: lease_grant
@@ -108,18 +114,13 @@ gold:
     dimension: requirements_coverage
     check: coverage
     requirement: R1
-    acceptable: [fencing-tokens]
+    acceptable: [distributed-lock]
   - id: g5
     dimension: requirements_coverage
     check: coverage
     requirement: R2
-    acceptable: [idempotency-keys, checkpoint-resume]
+    acceptable: [checkpoint-resume]
   - id: g6
-    dimension: requirements_coverage
-    check: coverage
-    requirement: R3
-    acceptable: [distributed-lock, leader-election]
-  - id: g7
     dimension: parsimony
     check: parsimony
     max_patterns: 6
@@ -144,21 +145,21 @@ twist:
     cannot stop a paused former owner; authority must travel as a monotonic token
     and be enforced by the resource being mutated.
   invalidated_canonical: >
-    "Acquire a lease, renew it, and check it before commit" fails g1, g2, and g4.
+    "Acquire a lease, renew it, and check it before commit" fails g1 and g2.
     Expiry grants liveness, not revocation. The metadata sink must atomically
     advance a per-shard fence on grant and reject every manifest commit whose
     epoch is not the current value.
-  twist_gold_refs: [g1, g2, g4]
+  twist_gold_refs: [g1, g2]
 
 gold_rationale: |
-  Concrete timeline (g1, g2, g4): suppose W1 receives epoch 41. At 30 seconds
+  Concrete timeline (g1, g2): suppose W1 receives epoch 41. At 30 seconds
   without renewal, the metadata transaction granting W2 increments the same
   shard row to epoch 42. That grant itself makes 41 stale; it does not wait for
   W2 to finish. W2's manifest update succeeds under `WHERE fence_epoch = 42`.
-  When W1 resumes at 90 seconds, its conditional update carries 41 and affects
-  zero rows because the authoritative value is 42. Thus W1 cannot overwrite W2
-  even if W2 has not yet published, a stronger guarantee than "reject an epoch
-  below the largest epoch previously seen on a write."
+  When W1 resumes nine hours later, its conditional update carries 41 and
+  affects zero rows because the authoritative value is 42. Thus W1 cannot
+  overwrite W2 even if W2 has not yet published, a stronger guarantee than
+  "reject an epoch below the largest epoch previously seen on a write."
 
   Why a lease check is insufficient (T1, T2): the failure detector cannot
   distinguish a paused W1 from a dead one, so C3 requires granting W2. Once that
@@ -167,14 +168,19 @@ gold_rationale: |
   Clock-skew margins only change the interval; they cannot remove it. The epoch
   comparison must be in the same metadata transaction as the manifest mutation.
 
-  Publication safety (g3, g5, T3): content-addressed immutable outputs make a
-  retry idempotent or resumable. Readers follow only the committed manifest, so
-  a crash or stale rejection exposes nothing. Unreferenced files enter a
-  quarantine long enough for in-flight attempts to finish, then garbage
-  collection removes them. Rewriting live inputs would violate C2 before the
-  fencing decision even runs.
+  Publication safety (g3, T3): readers follow only the committed manifest, so a
+  crash or stale rejection exposes none of the immutable staged output.
+  Unreferenced files enter a quarantine long enough for in-flight attempts to
+  finish, then garbage collection removes them. Rewriting live inputs would
+  violate C2 before the fencing decision even runs.
 
-  Liveness (g6): the 30-second lease still matters: it lets a distributed-lock or
-  leader-election mechanism replace a failed holder automatically. Fencing and
-  leasing solve different halves of the problem—leases permit takeover; fencing
-  makes takeover safe against the old holder.
+  Resumability (g5): at hour four, a five-hour restart would finish around hour
+  nine and violate C5's six-hour bound. A replacement that loads the latest
+  10-minute checkpoint loses at most ten minutes and reuses content-addressed
+  completed chunks, finishing by about hour 5:10. Checkpoint-resume is therefore
+  required by stated arithmetic rather than added as generic robustness.
+
+  Liveness (g4): the 30-second distributed lease still matters because it lets a
+  replacement take over automatically. Fencing and leasing solve different
+  halves of the problem—leases permit takeover; grant-time sink fencing makes
+  takeover safe against the old holder.
