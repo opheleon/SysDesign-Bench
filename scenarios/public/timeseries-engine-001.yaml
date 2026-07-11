@@ -113,23 +113,34 @@ gold:
     slot: mechanism
     acceptable: [per-tenant-crypto-shredding]
   - id: g4
-    dimension: tradeoff_selection
-    check: pattern_required
-    acceptable: [time-series-rollups]
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [lsm-tree]
   - id: g5
-    dimension: tradeoff_selection
-    check: pattern_required
-    acceptable: [ttl-expiry]
-  - id: g6
-    dimension: operability
-    check: pattern_required
-    acceptable: [compaction-strategy]
-  - id: g7
     dimension: requirements_coverage
     check: coverage
     requirement: R2
     acceptable: [secondary-indexes]
+  - id: g6
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [time-series-rollups]
+  - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
+    acceptable: [crypto-shredding]
   - id: g8
+    dimension: tradeoff_selection
+    check: pattern_required
+    acceptable: [ttl-expiry]
+  - id: g9
+    dimension: operability
+    check: pattern_required
+    acceptable: [compaction-strategy]
+  - id: g10
     dimension: parsimony
     check: parsimony
     max_patterns: 8
@@ -168,16 +179,16 @@ twist:
   twist_gold_refs: [g3]
 
 gold_rationale: |
-  Write path (g1, g6, g7, T1): 5M x 16 bytes = 80 MB/s raw. The measured B-tree
+  Write path (g1, g4, g5, g9, T1): 5M x 16 bytes = 80 MB/s raw. The measured B-tree
   floor is 5M/8 = 625K random page writes/s, 2.5x the 250K fixed-hardware
   ceiling. LSM sequential traffic is at most 80 MB/s x8 = 640 MB/s, only 32%
-  of the 2 GB/s sequential budget. Compaction (g6) is required to bound the
+  of the 2 GB/s sequential budget. Compaction (g9) is required to bound the
   resulting immutable runs. At that full load, the indexed LSM's measured
   recent-range p99 is 135 ms and meets C2; the unindexed 430 ms result makes the
-  sparse per-series secondary index required coverage for R2 (g7). The slot is
+  sparse per-series secondary index required coverage for R2 (g5). The slot is
   pinned by measured resource bounds, not by a generic preference for LSM.
 
-  Cold layout and rollups (g2, g4, g5): dashboards hit recent raw
+  Cold layout and rollups (g2, g6, g8): dashboards hit recent raw
   data (row-ish recent tier is fine in the memtable/hot tier), while
   13-month queries hit aggregates. The aggregate set is 120 TB logical:
   measured 6:1 columnar compression yields 20 TB and fits the 30 TB cap;
@@ -185,7 +196,7 @@ gold_rationale: |
   segments therefore jointly make R3 affordable. TTL expiry implements both
   retention edges (30-day raw, 13-month aggregates).
 
-  Erasure (g3, T2, T3): the three listed mechanisms are exhaustive for the
+  Erasure (g3, g7, T2, T3): the three listed mechanisms are exhaustive for the
   stated shared immutable layout.
   Rewriting one typical tenant touches ~20 TB, already 4x the entire 5 TB
   monthly rewrite allowance; weekly requests widen the gap to ~16x. Deferral:

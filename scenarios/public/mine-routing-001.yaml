@@ -53,6 +53,8 @@ context: |
   numbers; every erroneous report violates at least one of those predicates.
   Congestion must not block route computation: during telemetry-path failure the
   router continues from the last accepted congestion view for up to 60 seconds.
+  Accepted reports update an asynchronously refreshed materialized congestion
+  view; the 3,000-section graph and that view are read by the route engine.
 
 constraints:
   - id: C1
@@ -149,12 +151,22 @@ gold:
     check: role_forbidden
     role: ingest-store
     forbidden_components: [cassandra-4]
+  - id: g9
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [postgresql-16, mysql-8]
   - id: g10
     dimension: requirements_coverage
     check: coverage
     requirement: R5
     acceptable: [admission-control]
   - id: g11
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [materialized-views]
+  - id: g12
     dimension: parsimony
     check: parsimony
     max_patterns: 8
@@ -197,7 +209,8 @@ gold_rationale: |
   cannot enter after activation even during a two-minute dead zone. Congestion
   is explicitly different: C3 requires asynchronous propagation and routing
   from a <=60-second last-accepted view when telemetry is unavailable, so a
-  synchronous strong dependency fails the availability rule (g3/T2).
+  synchronous strong dependency fails the availability rule. The materialized
+  congestion view supplies that decoupled read path (g3/g11/T2).
 
   Right-sizing (g7, g8, T3): 120 writes/second and ~1 TB/90 days is roughly
   0.1% of a single PostgreSQL server's comfortable write capacity; the tunnel

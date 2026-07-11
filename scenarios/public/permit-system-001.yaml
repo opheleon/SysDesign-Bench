@@ -60,9 +60,7 @@ requirements:
   - id: R2
     text: Any read after a save reflects the save (no stale reads).
   - id: R3
-    text: Point-in-time reconstruction of any permit for auditors.
-  - id: R4
-    text: Seven-year history retention.
+    text: Point-in-time reconstruction of any permit for auditors throughout the seven-year retention period.
 
 flows:
   - id: permit_reads
@@ -106,27 +104,22 @@ gold:
   - id: g6
     dimension: requirements_coverage
     check: coverage
-    requirement: R4
-    acceptable: [temporal-audit-log, event-sourcing]
-  - id: g7
-    dimension: requirements_coverage
-    check: coverage
     requirement: R1
     acceptable: [secondary-indexes]
-  - id: g8
+  - id: g7
     dimension: requirements_coverage
     check: coverage
     requirement: R2
     acceptable: [postgresql-16, mysql-8]
-  - id: g9
+  - id: g8
     dimension: operability
     check: pattern_forbidden
     forbidden: [read-replicas, cache-aside, write-through-cache, write-behind-cache, edge-caching, cdn-caching]
-  - id: g10
+  - id: g9
     dimension: operability
     check: pattern_forbidden
     forbidden: [cqrs]
-  - id: g11
+  - id: g10
     dimension: parsimony
     check: parsimony
     max_patterns: 5
@@ -158,13 +151,13 @@ twist:
   invalidated_canonical: >
     The standard web-scale CRUD stack — asynchronous read replicas, cache-aside,
     and an asynchronously projected CQRS model — is scored as a violation here
-    (g9/g10): it either breaks C1's global visibility rule or adds infrastructure
+    (g8/g9): it either breaks C1's global visibility rule or adds infrastructure
     that C5 explicitly disallows. A synchronous event log remains a valid,
     though less parsimonious, audit implementation.
-  twist_gold_refs: [g9, g10]
+  twist_gold_refs: [g8, g9]
 
 gold_rationale: |
-  Capacity math (g3, g7-g10, T1, T3): a single PostgreSQL/MySQL instance on
+  Capacity math (g3, g6-g9, T1, T3): a single PostgreSQL/MySQL instance on
   modest hardware sustains thousands of simple transactional requests per
   second; the stated peak is 20 rps with <10 GB of data — roughly 0.5% of one
   primary's comfortable capacity, with flat growth. Asynchronous replicas,
@@ -174,14 +167,15 @@ gold_rationale: |
   version-validated cache could preserve visibility in another scenario, but
   C5 explicitly makes neither available here. The approved strongly consistent
   read/write endpoint is therefore entailed. Secondary indexes on permit
-  number, address, applicant, and status satisfy the explicit search bound (g7).
+  number, address, applicant, and status satisfy the explicit search bound (g6).
 
-  Audit (g5/g6, T2): C3 asks for point-in-time reconstruction. Temporal tables
+  Audit (g5, T2): C3 asks for point-in-time reconstruction throughout seven
+  years. Temporal tables
   or immutable audit rows provide it natively and are the parsimonious choice.
   Event sourcing in the same approved database is also correct if the current
   state is updated synchronously in the write transaction; it is therefore
   accepted. Only an asynchronously updated CQRS projection violates C1. Both
-  accepted history shapes retain the immutable record for seven years (g6).
+  accepted history shapes retain the immutable record for that full period.
 
   Store choice (g1, g2): global read-after-write visibility plus temporal
   history is native to the city-approved relational endpoint. Redis/Memcached,
