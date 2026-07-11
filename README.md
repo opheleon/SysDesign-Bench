@@ -94,33 +94,43 @@ semantics, recovery, observability, scheduling, cryptographic membership,
 ML correctness, and probabilistic latency. Held-out YAML is intentionally
 gitignored and must be backed up in a private store.
 
-## Baseline results (v0.1 pilot — 8 public scenarios)
+## Baseline results (v0.3 — 38 public scenarios, reasoning effort HIGH)
 
-| Model | Overall | clarify | infeasibility | migration | operability | parsimony | coverage | tradeoffs | Mode acc. | Format |
-|---|---|---|---|---|---|---|---|---|---|---|
-| claude-fable-5 | 0.98 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0.92 | 0.97 | 1.00 | 1.00 |
-| gpt-5.6-sol | 0.90 | 1.00 | 1.00 | 1.00 | 1.00 | 0.33 | 1.00 | 0.97 | 1.00 | 1.00 |
-| claude-opus-4-8 | 0.73 | 0.00 | 1.00 | 1.00 | 1.00 | 0.17 | 0.92 | 1.00 | 0.88 | 1.00 |
-| GLM-5.2 (Baseten) | 0.70 | 0.00 | 1.00 | 1.00 | 0.89 | 0.17 | 0.83 | 1.00 | 1.00 | 1.00 |
+| Model | Overall | Solution | clarify | infeas. | migration | operability | parsimony | coverage | tradeoffs | Mode | Format | Cost | Wall time |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| claude-fable-5 | **92%** | 100% | 100% | 100% | 100% | 100% | 50% | 96% | 99% | 100% | 100% | $6.67 | 25 min |
+| grok-4.5 | **88%** | 100% | 100% | 100% | 100% | 100% | 24% | 94% | 99% | 100% | 100% | $1.17¹ | 15 min |
+| gpt-5.6-sol | **81%** | 98% | 50% | 75% | 100% | 100% | 47% | 94% | 99% | 100% | 100% | ~$5² | 50 min |
+| claude-opus-4-8 | **75%** | 98% | 0% | 100% | 100% | 100% | 32% | 95% | 100% | 95% | 100% | $4.21 | 30 min |
+| GLM-5.2 (Baseten) | **72%** | 96% | 0% | 75% | 100% | 92% | 47% | 90% | 98% | 92% | 100% | $1.00 | 19 min |
 
-Protocol: pass@1, single run, July 2026. Temperature 0 where the provider
-supports it; models that pin sampling (claude-sonnet-5, gpt-5.6 family) run at
-their provider default — recorded here for comparability. gpt-5.5 was attempted
-and excluded (provider-side failures before first output).
+Protocol: pass@1, single run, July 2026, reasoning effort high everywhere
+(Anthropic adaptive thinking / OpenAI-style reasoning_effort; temperature at
+provider default for reasoning modes). **Solution** = pass rate over the
+mode-defining answer checks only (decision slots, conflict sets, missing-info
+sets) — "did the model actually solve it." **Overall** macro-averages all
+dimensions — "would you want it designing systems you operate."
+¹ xAI console figure; recorded value predated the reasoning-token accounting
+fix. ² gpt-5.6-sol run interrupted once and topped up via targeted rerun.
 
-Notable: the clarification scenario cleanly split the field — two models asked
-for the missing load/budget figures; claude-opus-4-8 confidently designed an
-architecture for numbers it never saw (mode-gated to 0), and GLM-5.2 asked but
-padded in an unjustified question. Parsimony (over-engineering) was the widest
-spread: on the FPS scenario the pattern-selection counts were 14 / 17 / 18 / 33.
+Headline findings:
+- **Architectural correctness is saturated at high effort**: every model
+  solves 96-100% of the mode-defining decisions. The spread lives in the
+  supporting dimensions.
+- **Over-engineering is the discriminator**: parsimony spans 24-50% and no
+  model is good at restraint; the Solution-vs-Overall gap is a legible
+  "brilliant but over-builds" signature (grok: 100%/88%).
+- **Clarification-seeking is binary and thinking-invariant**: fable and grok
+  always ask when load-bearing facts are missing; opus and GLM design anyway
+  at every thinking budget tested (three consecutive pilots); gpt splits.
+- **Haystack pair delta was zero-to-positive**: no model lost solution content
+  when requirements were buried in ~1,200 words of documents with decoys —
+  longer documents are needed to stress extraction (v0.4).
 
-Calibration note: after the first pilot pass, 2 of 76 items were re-authored
-(a role-taxonomy synonym the gold set didn't accept; two parsimony caps set
-below the entailed pattern count) and all predictions were **re-graded, not
-re-run** — the decoupled predictions/grading flow exists exactly for this.
-Item validation status: v0.1 pilot results are retained for historical
-comparability. New v0.2/v0.3 items require independent proof review and a
-multi-model discrimination pilot before a new baseline table is published.
+Calibration status: 327 items graded; 44 discriminate, 13 fail for all five
+models and are under review per the all-fail-indicts-the-item rule (11 are
+parsimony caps, 2 are coverage acceptable-sets). v0.1/v0.2 pilot tables are
+retained in git history.
 
 ## What we consciously don't measure
 

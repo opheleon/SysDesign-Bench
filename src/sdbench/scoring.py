@@ -72,11 +72,14 @@ def render_report(all_scores: list[RunScores]) -> str:
         "| " + " | ".join(header) + " |",
         "|" + "---|" * len(header),
     ]
+    def pct(x: float) -> str:
+        return f"{x * 100:.0f}%"
+
     for s in sorted(all_scores, key=lambda s: s.overall, reverse=True):
-        row = [s.model, f"{s.overall:.2f}", f"{s.solution:.2f}"]
+        row = [s.model, pct(s.overall), pct(s.solution)]
         for d in dims:
-            row.append(f"{s.dimensions[d].fraction:.2f}" if d in s.dimensions else "—")
-        row += [f"{s.mode_accuracy:.2f}", f"{s.format_compliance:.2f}"]
+            row.append(pct(s.dimensions[d].fraction) if d in s.dimensions else "—")
+        row += [pct(s.mode_accuracy), pct(s.format_compliance)]
         lines.append("| " + " | ".join(row) + " |")
 
     for s in all_scores:

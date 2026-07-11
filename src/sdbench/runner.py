@@ -47,6 +47,7 @@ class PredictionRecord(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0
+    duration_s: float = 0.0
 
     @property
     def is_provider_failure(self) -> bool:
@@ -105,9 +106,12 @@ def run_scenario(
     complete_fn: CompleteFn,
     reasoning: str = "none",
 ) -> PredictionRecord:
+    import time  # noqa: PLC0415
+
     prompt = build_prompt(scenario, catalogs)
     messages: list[dict] = [{"role": "user", "content": prompt}]
     usage = Usage()
+    started = time.monotonic()
 
     def _record(raw: str, spec, error: str, repaired: bool) -> PredictionRecord:
         return PredictionRecord(
@@ -122,6 +126,7 @@ def run_scenario(
             prompt_tokens=usage.prompt_tokens,
             completion_tokens=usage.completion_tokens,
             cost_usd=round(usage.cost_usd, 6),
+            duration_s=round(time.monotonic() - started, 2),
         )
 
     try:
