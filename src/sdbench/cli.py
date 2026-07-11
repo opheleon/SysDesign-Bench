@@ -19,7 +19,13 @@ from . import __version__
 from .grade import grade_spec
 from .prompt import build_prompt
 from .providers import build_complete_fn, estimate_cost, parse_model_spec
-from .runner import append_prediction, read_predictions, run_scenarios
+from .runner import (
+    load_cached,
+    read_predictions,
+    run_scenarios,
+    store_cached,
+    write_predictions,
+)
 from .schema import Catalogs, Scenario, load_catalogs, load_scenario, load_scenarios
 from .scoring import RunScores, render_report, score
 from .validate import validate_catalogs, validate_scenario
@@ -93,24 +99,43 @@ def _cmd_run(args: argparse.Namespace) -> int:
     catalogs, scenarios = _load(args)
     reasoning = None if args.reasoning == "none" else args.reasoning
     out = Path(args.out)
+    cache_dir = Path(args.cache_dir)
+
+    if args.only:
+        wanted = {i.strip() for i in args.only.split(",") if i.strip()}
+        unknown = wanted - {s.instance_id for s in scenarios}
+        if unknown:
+            raise SystemExit(f"--only names unknown scenario(s): {sorted(unknown)}")
+        scenarios = [s for s in scenarios if s.instance_id in wanted]
 
     skip: set[str] = set()
     if args.resume and out.exists():
         skip = {r.instance_id for r in read_predictions(out)}
         print(f"Resuming: {len(skip)} prediction(s) already in {out}.", flush=True)
-    elif out.exists():
+    elif out.exists() and not args.only:
         out.unlink()
 
-    # Pre-run cost estimate from real prompt sizes (chars/4 ~= tokens) plus an
-    # assumed completion budget per scenario.
+    # Partition into cache hits and scenarios that need API calls. The cache
+    # key includes reasoning effort — results vary by thinking budget.
+    cached: list = []
+    todo = []
+    for s in scenarios:
+        if s.instance_id in skip:
+            continue
+        hit = None if args.no_cache else load_cached(cache_dir, args.model, args.reasoning, s.instance_id)
+        if hit is not None:
+            cached.append(hit)
+        else:
+            todo.append(s)
+
     _, model_id = parse_model_spec(args.model)
-    todo = [s for s in scenarios if s.instance_id not in skip]
     est_prompt_tokens = sum(len(build_prompt(s, catalogs)) // 4 for s in todo)
     est_completion = _EST_COMPLETION_TOKENS[args.reasoning] * len(todo)
     est = estimate_cost(model_id, est_prompt_tokens, est_completion)
     print(
-        f"Running {args.model} on {len(todo)} scenario(s), reasoning={args.reasoning} | "
-        f"estimated cost: ~${est:.2f} "
+        f"Running {args.model} | {len(cached)} cached, {len(todo)} to run "
+        f"(reasoning={args.reasoning}, parallel={args.parallel}) | "
+        f"estimated cost for uncached: ~${est:.2f} "
         f"(~{est_prompt_tokens:,} prompt + ~{est_completion:,} completion tokens)",
         flush=True,
     )
@@ -120,7 +145,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
 
     def on_progress(r) -> None:
-        append_prediction(r, out)
+        store_cached(cache_dir, r)
         status = "ok" if r.format_compliant else f"FAIL ({r.error[:60]})"
         print(
             f"  {r.instance_id}: {status}"
@@ -129,20 +154,51 @@ def _cmd_run(args: argparse.Namespace) -> int:
             flush=True,
         )
 
-    records = run_scenarios(
+    fresh = run_scenarios(
         scenarios, catalogs, args.model, complete_fn,
-        skip_instance_ids=skip, on_progress=on_progress,
+        reasoning=args.reasoning,
+        skip_instance_ids=skip | {c.instance_id for c in cached},
+        on_progress=on_progress,
+        parallel=args.parallel,
     )
+
+    # Output file holds cached + fresh in scenario order. With --only against
+    # an existing file, replace just those records and keep the rest.
+    by_id = {r.instance_id: r for r in cached}
+    by_id.update({r.instance_id: r for r in fresh})
+    if args.only and out.exists():
+        for r in read_predictions(out):
+            by_id.setdefault(r.instance_id, r)
+    ordered_ids = [s.instance_id for s in load_scenarios(Path(args.scenarios))]
+    records = [by_id[i] for i in ordered_ids if i in by_id]
+    write_predictions(records, out)
+
     compliant = sum(r.format_compliant for r in records)
-    total_cost = sum(r.cost_usd for r in records)
-    total_prompt = sum(r.prompt_tokens for r in records)
-    total_completion = sum(r.completion_tokens for r in records)
+    total_cost = sum(r.cost_usd for r in fresh)
     print(
-        f"Wrote {len(records)} prediction(s) to {out} ({compliant}/{len(records)} format-compliant). "
-        f"Actual cost: ${total_cost:.2f} "
-        f"({total_prompt:,} prompt + {total_completion:,} completion tokens).",
+        f"Wrote {len(records)} prediction(s) to {out} ({compliant}/{len(records)} format-compliant; "
+        f"{len(cached)} from cache). Actual cost this run: ${total_cost:.2f} "
+        f"({sum(r.prompt_tokens for r in fresh):,} prompt + "
+        f"{sum(r.completion_tokens for r in fresh):,} completion tokens).",
         flush=True,
     )
+    return 0
+
+
+def _cmd_cache_import(args: argparse.Namespace) -> int:
+    """Import an existing predictions file into the cache (e.g. runs made
+    before caching existed). Provider failures are skipped."""
+    cache_dir = Path(args.cache_dir)
+    imported = skipped = 0
+    for record in read_predictions(Path(args.predictions)):
+        if args.reasoning is not None:
+            record = record.model_copy(update={"reasoning": args.reasoning})
+        if record.is_provider_failure:
+            skipped += 1
+            continue
+        store_cached(cache_dir, record)
+        imported += 1
+    print(f"Imported {imported} record(s) into {cache_dir} ({skipped} provider-failure(s) skipped).")
     return 0
 
 
@@ -222,11 +278,26 @@ def main(argv: list[str] | None = None) -> int:
                        help="Reasoning effort: Anthropic extended-thinking budget / OpenAI reasoning_effort")
     p_run.add_argument("--resume", action="store_true",
                        help="Skip instance_ids already present in --out (crash recovery)")
+    p_run.add_argument("--only", default=None,
+                       help="Comma-separated instance_ids to (re)run; other records in --out are kept")
+    p_run.add_argument("--parallel", type=int, default=4,
+                       help="Concurrent scenario requests (default 4)")
+    p_run.add_argument("--no-cache", action="store_true",
+                       help="Ignore cached predictions and call the API for every scenario")
+    p_run.add_argument("--cache-dir", default="results/cache",
+                       help="Prediction cache keyed by (model, reasoning, instance)")
     p_run.add_argument("--api-base", default=None,
                        help="Custom OpenAI-compatible endpoint override")
     p_run.add_argument("--api-key-env", default=None,
                        help="Env var holding the key for --api-base")
     p_run.set_defaults(func=_cmd_run)
+
+    p_import = sub.add_parser("cache-import", help="Import a predictions.jsonl into the cache")
+    p_import.add_argument("predictions")
+    p_import.add_argument("--cache-dir", default="results/cache")
+    p_import.add_argument("--reasoning", default=None, choices=["none", "low", "medium", "high"],
+                          help="Override the reasoning label on imported records (for pre-cache files)")
+    p_import.set_defaults(func=_cmd_cache_import)
 
     p_grade = sub.add_parser("grade", help="Grade predictions.jsonl -> scores.json (no LLM calls)")
     _add_data_args(p_grade)

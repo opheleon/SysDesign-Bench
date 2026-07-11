@@ -141,6 +141,59 @@ class TestRunScenario:
         assert len(read_predictions(path)) == 1
 
 
+class TestCacheAndParallel:
+    def test_cache_roundtrip_and_effort_keying(self, proof_scenario, catalogs, tmp_path):
+        from sdbench.runner import load_cached, store_cached
+
+        fake = fake_complete_returning(GOLD_JSON)
+        record = run_scenario(proof_scenario, catalogs, "fake/model", fake, reasoning="high")
+        store_cached(tmp_path, record)
+
+        hit = load_cached(tmp_path, "fake/model", "high", proof_scenario.instance_id)
+        assert hit == record
+        # different effort is a different cache key
+        assert load_cached(tmp_path, "fake/model", "none", proof_scenario.instance_id) is None
+        # different model is a different cache key
+        assert load_cached(tmp_path, "other/model", "high", proof_scenario.instance_id) is None
+
+    def test_provider_failures_never_cached(self, proof_scenario, catalogs, tmp_path):
+        from sdbench.runner import load_cached, store_cached
+
+        def exploding(messages):
+            raise TimeoutError("boom")
+
+        record = run_scenario(proof_scenario, catalogs, "fake/model", exploding, reasoning="high")
+        assert record.is_provider_failure
+        store_cached(tmp_path, record)
+        assert load_cached(tmp_path, "fake/model", "high", proof_scenario.instance_id) is None
+
+    def test_format_failures_are_cached(self, proof_scenario, catalogs, tmp_path):
+        from sdbench.runner import load_cached, store_cached
+
+        fake = fake_complete_returning("prose", "more prose")
+        record = run_scenario(proof_scenario, catalogs, "fake/model", fake, reasoning="high")
+        assert not record.format_compliant and not record.is_provider_failure
+        store_cached(tmp_path, record)
+        assert load_cached(tmp_path, "fake/model", "high", proof_scenario.instance_id) is not None
+
+    def test_parallel_execution(self, proof_scenario, catalogs):
+        import threading
+
+        seen_threads = set()
+        lock = threading.Lock()
+
+        def fake(messages):
+            with lock:
+                seen_threads.add(threading.current_thread().name)
+            return Completion(text=GOLD_JSON, usage=FAKE_USAGE)
+
+        scenarios = [proof_scenario.model_copy(update={"instance_id": f"probe-{i}"}) for i in range(6)]
+        records = run_scenarios(scenarios, catalogs, "fake/model", fake, parallel=3)
+        assert len(records) == 6
+        assert {r.instance_id for r in records} == {f"probe-{i}" for i in range(6)}
+        assert all(r.format_compliant for r in records)
+
+
 class TestPrompt:
     def test_prompt_carries_everything_needed(self, proof_scenario, catalogs):
         prompt = build_prompt(proof_scenario, catalogs)

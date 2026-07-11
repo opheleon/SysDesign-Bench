@@ -38,6 +38,7 @@ class PredictionRecord(BaseModel):
 
     instance_id: str
     model: str
+    reasoning: str = "none"
     raw_output: str
     spec: DesignSpec | None
     format_compliant: bool
@@ -46,6 +47,11 @@ class PredictionRecord(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0
+
+    @property
+    def is_provider_failure(self) -> bool:
+        """Infrastructure failure (timeout, 4xx/5xx) — retryable, never cached."""
+        return self.error.startswith("provider error")
 
 
 def extract_json(text: str) -> str | None:
@@ -97,6 +103,7 @@ def run_scenario(
     catalogs: Catalogs,
     model_spec: str,
     complete_fn: CompleteFn,
+    reasoning: str = "none",
 ) -> PredictionRecord:
     prompt = build_prompt(scenario, catalogs)
     messages: list[dict] = [{"role": "user", "content": prompt}]
@@ -106,6 +113,7 @@ def run_scenario(
         return PredictionRecord(
             instance_id=scenario.instance_id,
             model=model_spec,
+            reasoning=reasoning,
             raw_output=raw,
             spec=spec,
             format_compliant=spec is not None,
@@ -143,19 +151,75 @@ def run_scenarios(
     catalogs: Catalogs,
     model_spec: str,
     complete_fn: CompleteFn,
+    reasoning: str = "none",
     skip_instance_ids: set[str] | None = None,
     on_progress: Callable[[PredictionRecord], None] | None = None,
+    parallel: int = 1,
 ) -> list[PredictionRecord]:
-    records = []
+    """Run scenarios, optionally with a thread pool.
+
+    Records are returned (and reported via on_progress) in completion order;
+    on_progress is always invoked from the calling thread, so file appends
+    stay single-threaded.
+    """
     skip = skip_instance_ids or set()
-    for scenario in scenarios:
-        if scenario.instance_id in skip:
-            continue
-        record = run_scenario(scenario, catalogs, model_spec, complete_fn)
-        records.append(record)
-        if on_progress:
-            on_progress(record)
+    todo = [s for s in scenarios if s.instance_id not in skip]
+    records: list[PredictionRecord] = []
+
+    if parallel <= 1:
+        for scenario in todo:
+            record = run_scenario(scenario, catalogs, model_spec, complete_fn, reasoning)
+            records.append(record)
+            if on_progress:
+                on_progress(record)
+        return records
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: PLC0415
+
+    with ThreadPoolExecutor(max_workers=parallel) as pool:
+        futures = {
+            pool.submit(run_scenario, s, catalogs, model_spec, complete_fn, reasoning): s
+            for s in todo
+        }
+        for future in as_completed(futures):
+            record = future.result()
+            records.append(record)
+            if on_progress:
+                on_progress(record)
     return records
+
+
+# ---------------------------------------------------------------------------
+# Prediction cache: (model, reasoning, instance_id) -> record.
+# Results vary by thinking effort, so effort is part of the key. Provider
+# failures (timeouts, 4xx/5xx) are never cached — they are retryable
+# infrastructure noise, not model results. Genuine outputs, including
+# format-noncompliant ones, are valid benchmark results and are cached.
+# ---------------------------------------------------------------------------
+
+def cache_path(cache_dir: Path, model_spec: str, reasoning: str, instance_id: str) -> Path:
+    safe_model = model_spec.replace("/", "__")
+    return cache_dir / safe_model / reasoning / f"{instance_id}.json"
+
+
+def load_cached(cache_dir: Path, model_spec: str, reasoning: str, instance_id: str) -> PredictionRecord | None:
+    path = cache_path(cache_dir, model_spec, reasoning, instance_id)
+    if not path.is_file():
+        return None
+    try:
+        return PredictionRecord.model_validate_json(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None  # unreadable cache entry counts as a miss
+
+
+def store_cached(cache_dir: Path, record: PredictionRecord) -> None:
+    if record.is_provider_failure:
+        return
+    path = cache_path(cache_dir, record.model, record.reasoning, record.instance_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(record.model_dump_json(), encoding="utf-8")
+    tmp.replace(path)
 
 
 def append_prediction(record: PredictionRecord, path: Path) -> None:
