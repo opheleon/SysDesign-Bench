@@ -1,0 +1,69 @@
+# SysDesign-Bench component menu.
+# Version-pinned: capability claims are checked against the pinned major version's
+# documented properties. Additions are versioned and additive (see README: Contributing).
+version: "0.1.0"
+components:
+  # --- Databases ---
+  - id: postgresql-16
+    name: PostgreSQL 16
+    category: relational-database
+    description: ACID relational database; serializable isolation, logical replication, PostGIS extension.
+  - id: mysql-8
+    name: MySQL 8
+    category: relational-database
+    description: ACID relational database; InnoDB storage engine, group replication.
+  - id: redis-7
+    name: Redis 7
+    category: in-memory-datastore
+    description: In-memory data structures; optional persistence (RDB/AOF); async replication only — no synchronous durability guarantee by default.
+  - id: cassandra-4
+    name: Apache Cassandra 4
+    category: wide-column-database
+    description: Masterless wide-column store; tunable per-query consistency; no multi-row ACID transactions.
+  - id: mongodb-7
+    name: MongoDB 7
+    category: document-database
+    description: Document database; multi-document transactions on replica sets; tunable read/write concerns.
+  # --- Brokers / queues ---
+  - id: kafka
+    name: Apache Kafka
+    category: message-broker
+    description: Partitioned append-only log; consumer groups; replayable; at-least-once by default.
+  - id: rabbitmq
+    name: RabbitMQ
+    category: message-broker
+    description: AMQP broker; routing, per-message acknowledgement, dead-letter exchanges.
+  - id: sqs
+    name: AWS SQS
+    category: queue-service
+    description: Managed queue; at-least-once, visibility timeouts; FIFO variant with throughput limits.
+  # --- Caches ---
+  - id: memcached
+    name: Memcached
+    category: cache
+    description: Volatile in-memory key-value cache; no persistence, no replication.
+  # --- Languages ---
+  - id: python
+    name: Python
+    category: language
+    description: General-purpose; GIL constrains CPU-bound single-process parallelism.
+  - id: typescript
+    name: TypeScript / Node.js
+    category: language
+    description: Event-loop concurrency; single-threaded per process.
+  - id: java
+    name: Java
+    category: language
+    description: JVM; mature concurrency; GC pauses tunable (ZGC/Shenandoah).
+  - id: go
+    name: Go
+    category: language
+    description: Compiled; goroutine concurrency; GC with sub-ms pauses.
+  - id: cpp
+    name: C++
+    category: language
+    description: Compiled, no GC; manual memory control; suited to latency-critical hot paths.
+  - id: rust
+    name: Rust
+    category: language
+    description: Compiled, no GC; memory safety without runtime; suited to latency-critical hot paths.

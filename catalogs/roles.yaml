@@ -1,0 +1,39 @@
+# SysDesign-Bench role taxonomy.
+# A design spec assigns each chosen component exactly one role per entry.
+# The same component may appear under multiple roles (e.g. redis-7 as serving-cache
+# and session-store) — grading checks (component, role) pairs.
+version: "0.1.0"
+roles:
+  - id: system-of-record
+    name: System of record
+    description: Authoritative durable store for business state.
+  - id: serving-cache
+    name: Serving cache
+    description: Read-path cache in front of a store; derived, evictable data.
+  - id: ingest-store
+    name: Ingest store
+    description: Write-optimized store absorbing high-volume telemetry/event writes.
+  - id: message-queue
+    name: Message queue
+    description: Asynchronous transport decoupling producers from consumers.
+  - id: session-store
+    name: Session store
+    description: Short-lived per-user/session state.
+  - id: analytics-store
+    name: Analytics store
+    description: Store serving offline/aggregate queries, not the request hot path.
+  - id: hot-path-state
+    name: Hot-path state
+    description: In-process or co-located state on the latency-critical path.
+  - id: cold-path-persistence
+    name: Cold-path persistence
+    description: Durable storage off the latency-critical path (audit, history, profiles).
+  - id: search-index
+    name: Search index
+    description: Derived index for search/geo/text queries.
+  - id: coordination-store
+    name: Coordination store
+    description: Locks, leases, leader election, distributed coordination.
+  - id: implementation-language
+    name: Implementation language
+    description: Primary language for the named subsystem.

@@ -1,0 +1,168 @@
+# Proof-case scenario: pure physics infeasibility.
+# Gold mode is `infeasible`: the latency budget, linearizability, single-region
+# topology, and intercontinental store locations are jointly unsatisfiable.
+instance_id: retail-inventory-lookup-001
+domain: retail-inventory
+difficulty: medium
+version: "0.1.0"
+split: public
+
+problem_statement: |
+  A global fashion retailer is building a handheld app for floor staff to check
+  live item availability while talking to customers. Leadership has signed off on
+  the following requirements and will not accept regressions on any of them
+  without an explicit escalation.
+
+  The retailer operates flagship stores in Sydney, Berlin, São Paulo, and
+  Virginia (US). All inventory data lives in the company's single approved data
+  center in northern Virginia (us-east); the security team has certified only
+  this facility for inventory data at rest.
+
+  Because staff use the lookup mid-conversation, UX research set a hard
+  responsiveness bar: an availability lookup must complete in at most 9 ms at
+  p99, measured on the device. Store devices connect over in-store Wi-Fi
+  (round-trip to the in-store gateway ≈ 2 ms).
+
+  Finance was burned by an overselling incident last year: a floor associate
+  promised the last unit of an item that had just sold in another store. The
+  audit remediation requires that every availability read reflect the latest
+  committed sale globally — a read must never show a unit as available after
+  its sale has committed anywhere.
+
+  Constraints (numbered; reference these ids in your response):
+  - C1 (latency): availability lookup p99 ≤ 9 ms end-to-end, measured on device.
+  - C2 (consistency): reads are linearizable with respect to committed sales
+    globally — no stale availability, ever.
+  - C3 (topology): all inventory data is stored and served from the single
+    certified data center in northern Virginia.
+  - C4 (geography): stores operate on four continents (Sydney, Berlin,
+    São Paulo, Virginia) and all of them get the same guarantees.
+
+  If a compliant design exists, submit it. If the constraints cannot be
+  jointly satisfied, say so: identify the conflicting constraint ids and pick
+  the relaxation you would recommend from the options below.
+
+  Relaxation options (pick by id if you declare infeasibility):
+  - RX1: Relax C1 — allow availability lookups up to p99 ≤ 200 ms.
+  - RX2: Relax C2 — serve availability reads from regional replicas with
+    bounded staleness (≤ 2 s); keep linearizability only for the
+    sale/reservation write path.
+  - RX3: Relax C3 — allow per-store inventory partitions with in-store or
+    in-region leaders (each store's stock led locally), with asynchronous
+    central aggregation in Virginia.
+  - RX4: Keep all constraints and add regional read caches in front of the
+    Virginia cluster to meet the latency bar.
+
+context: |
+  Team: 6 backend engineers comfortable with relational databases. Existing
+  stack: the Virginia data center runs the current inventory system on a
+  relational database. Store count: 40 stores today, 60 planned. Lookup volume:
+  ~5 lookups/minute/store at peak — load is trivial; this problem is not about
+  throughput.
+
+constraints:
+  - id: C1
+    type: latency
+    value: "availability lookup p99 <= 9 ms end-to-end, measured on device"
+  - id: C2
+    type: consistency
+    value: "linearizable availability reads with respect to globally committed sales"
+  - id: C3
+    type: topology
+    value: "inventory data stored and served exclusively from the single certified Virginia data center"
+  - id: C4
+    type: network
+    value: "stores on four continents (Sydney, Berlin, Sao Paulo, Virginia) with identical guarantees; in-store Wi-Fi RTT to gateway ~2 ms"
+
+requirements:
+  - id: R1
+    text: Floor staff can look up live availability of any item in their store.
+  - id: R2
+    text: Availability reads never show a unit as available after its sale committed anywhere (no overselling).
+  - id: R3
+    text: All stores on all four continents receive the same latency and consistency guarantees.
+
+flows: []
+
+relaxation_options:
+  - id: RX1
+    description: Relax C1 to p99 <= 200 ms for availability lookups.
+  - id: RX2
+    description: Relax C2 to bounded-staleness (<= 2 s) regional replica reads; linearizable writes only.
+  - id: RX3
+    description: Relax C3 to per-store inventory partitions with local leaders and async central aggregation.
+  - id: RX4
+    description: Keep all constraints; add regional read caches in front of Virginia. (Trap — caches cannot serve linearizable reads without a Virginia round trip.)
+
+expected_mode: infeasible
+
+gold:
+  - id: g1
+    dimension: infeasibility_detection
+    check: conflicting_constraints
+    expected: [C1, C2, C3, C4]
+  - id: g2
+    dimension: infeasibility_detection
+    check: relaxation
+    acceptable: [RX1, RX2, RX3]
+
+traps:
+  - id: T1
+    description: Add regional/edge caches (e.g. Redis) in front of the Virginia cluster and claim all constraints are met (relaxation RX4, or a design-mode answer with a serving cache).
+    violated_constraint_id: C2
+    why_attractive: '"Cache it" is the canonical answer to every read-latency problem, and 9 ms is comfortably achievable from a nearby cache — but a cache in Berlin cannot serve a linearizable read without a round trip to Virginia; any cached answer can be stale across the oversell window.'
+  - id: T2
+    description: Propose a faster protocol stack (QUIC/gRPC, connection pre-warming, kernel bypass) to hit 9 ms against Virginia.
+    violated_constraint_id: C4
+    why_attractive: Protocol tuning genuinely removes tens of milliseconds of handshake overhead, which feels like it attacks the problem — but it cannot beat speed-of-light propagation delay from Sydney/Berlin/São Paulo to Virginia.
+  - id: T3
+    description: Confidently submit a standard three-tier design (device -> API in Virginia -> relational DB) because the load is tiny.
+    violated_constraint_id: C1
+    why_attractive: The throughput really is trivial and the team knows this stack; nothing about the load suggests trouble. Only the geography/latency arithmetic exposes the violation.
+
+twist:
+  description: >
+    The classic mobile-app read-latency problem is presented with the classic
+    fix (caching) explicitly available as relaxation option RX4 — but the
+    linearizability constraint makes the canonical fix a trap rather than an
+    answer.
+  invalidated_canonical: >
+    "Add a caching/CDN layer in front of the central database" — the standard
+    recited answer to read-latency requirements — violates C2 here, because no
+    regional cache can serve a linearizable read without contacting the single
+    Virginia leader, which reintroduces the WAN round trip that broke C1.
+  twist_gold_refs: [g1, g2]
+
+gold_rationale: |
+  The four constraints are jointly unsatisfiable, and removing any single one
+  restores feasibility — so the minimal conflicting set is exactly {C1, C2, C3, C4}.
+
+  Physics: a linearizable read under C2+C3 must contact the Virginia leader (or
+  a read quorum that includes it) — any answer served without doing so can miss
+  a sale committed in the intervening window, violating C2. Great-circle
+  distances to northern Virginia: Sydney ~15,700 km, Berlin ~6,700 km,
+  São Paulo ~7,600 km. Light in fiber travels ~200,000 km/s (~5 µs/km one way),
+  so the theoretical minimum RTT is Sydney ≥ 157 ms, Berlin ≥ 67 ms,
+  São Paulo ≥ 76 ms — before adding routing inefficiency (real-world RTTs run
+  1.3–2x the physical floor), the ~2 ms in-store Wi-Fi hop (C4), TLS/processing,
+  and DB read time. Every non-Virginia store therefore has a hard floor of
+  ~67–157+ ms per lookup against a 9 ms budget (C1). The budget is exceeded by
+  roughly an order of magnitude by propagation delay alone; no protocol,
+  hardware, or software choice recovers it.
+
+  Each constraint is load-bearing:
+  - Drop C1 (RX1, 200 ms): Sydney's ~160–250 ms real-world RTT fits; linearizable
+    central reads become viable. Feasible.
+  - Drop C2 (RX2, bounded staleness): a regional/in-store replica answers in
+    ~2–5 ms over store Wi-Fi; staleness ≤ 2 s bounds the oversell window and the
+    write path stays linearizable. Feasible.
+  - Drop C3 (RX3, per-store leaders): a store's own stock is led in-store or
+    in-region; a linearizable read of local stock completes in ~2–5 ms. Feasible.
+  - Drop C4 (hypothetically all stores in Virginia metro): ~2 ms Wi-Fi +
+    single-digit-ms metro RTT + fast indexed read fits 9 ms. Feasible.
+
+  Trap RX4 (regional caches, keep everything): a cache hit in Berlin cannot be
+  linearizable — between cache fill and read, a sale can commit in Virginia, so
+  the read violates C2; making the cache authoritative-consistent requires
+  synchronous coordination with Virginia, which reintroduces the ≥ 67 ms RTT and
+  violates C1. RX4 relaxes nothing and is therefore not in g2's acceptable set.

@@ -1,0 +1,199 @@
+# De-labeled maps backend, safety-inverted: consumer-nav canon (everything
+# eventual, fail-open) is wrong here. Closures are safety-critical and must be
+# strongly consistent / fail-closed; congestion stays eventual. Tests mixed
+# consistency models and right-sizing for a small on-prem deployment.
+instance_id: mine-routing-001
+domain: industrial-routing
+difficulty: medium
+version: "0.1.0"
+split: public
+
+problem_statement: |
+  An underground mining operator needs a routing backend for its vehicle
+  fleet. Vehicles drive through a tunnel network and receive routes from the
+  backend. There is no GPS underground: positioning comes from fixed beacons
+  along tunnels. Connectivity is mesh Wi-Fi with known dead zones — vehicles
+  drop offline for up to two minutes routinely.
+
+  Two kinds of dynamic information affect routing:
+
+  1. SECTION CLOSURES, declared by the safety office (blasting, maintenance,
+     collapse risk). Routing a vehicle through a closed section is a
+     potentially fatal safety incident. The safety office's word is law and
+     takes effect immediately.
+  2. CONGESTION, derived from vehicle position reports. It affects ETAs and
+     route choice but has no safety implication. Individual reports can be
+     wrong (beacon glitches, sensor faults).
+
+  The tunnel graph itself changes about daily as sections are dug or sealed.
+
+  The backend runs on two on-prem servers at the mine site, operated by a
+  4-person software team. Fleet: 120 vehicles, each reporting position once
+  per second. Design the routing backend: how closures and congestion
+  propagate, how vehicles behave through dead zones, and what runs on which
+  store.
+
+context: |
+  Load numbers: 120 vehicles x 1 report/second = 120 writes/second sustained.
+  Routing requests: a few per minute. Tunnel graph: ~3,000 sections. History
+  retention for congestion analytics: 90 days (~1 TB upper bound).
+
+constraints:
+  - id: C1
+    type: consistency
+    value: "a vehicle must never be routed through, or drive into, a section whose closure it has not confirmed; closures take effect immediately"
+  - id: C2
+    type: network
+    value: "no GPS; beacon positioning; mesh Wi-Fi with dead zones - vehicles routinely offline up to 2 minutes"
+  - id: C3
+    type: consistency
+    value: "congestion is advisory: eventual freshness within ~60 seconds is acceptable; individual reports may be erroneous"
+  - id: C4
+    type: team
+    value: "4-person team, two on-prem servers at the mine site; minimal operational surface"
+  - id: C5
+    type: scale
+    value: "120 vehicles, 120 telemetry writes/second, ~3,000 graph sections - small scale"
+
+requirements:
+  - id: R1
+    text: Compute routes over the tunnel graph for vehicles.
+  - id: R2
+    text: Declared closures immediately block affected routes and reach affected vehicles.
+  - id: R3
+    text: Vehicle position reports feed congestion-aware ETAs and route choice.
+  - id: R4
+    text: A vehicle that loses connectivity behaves safely with respect to closures.
+    implicit: true
+  - id: R5
+    text: Erroneous position reports do not corrupt routing decisions.
+    implicit: true
+
+flows:
+  - id: closure_propagation
+    description: How a declared closure reaches the router and the fleet.
+    decision_slots:
+      consistency: [strong, eventual]
+      failure_policy: [fail-closed, fail-open]
+  - id: congestion_updates
+    description: How position-derived congestion flows into routing.
+    decision_slots:
+      consistency: [strong, eventual]
+  - id: offline_vehicle
+    description: Vehicle behavior while out of coverage in a dead zone.
+    decision_slots:
+      policy: [proceed-indefinitely-on-cached-route, halt-when-closure-data-exceeds-staleness-bound]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: closure_propagation
+    slot: consistency
+    acceptable: [strong]
+  - id: g2
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: closure_propagation
+    slot: failure_policy
+    acceptable: [fail-closed]
+  - id: g3
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: congestion_updates
+    slot: consistency
+    acceptable: [eventual]
+  - id: g4
+    dimension: operability
+    check: slot_match
+    flow: offline_vehicle
+    slot: policy
+    acceptable: [halt-when-closure-data-exceeds-staleness-bound]
+  - id: g5
+    dimension: operability
+    check: pattern_required
+    acceptable: [staleness-fallback]
+  - id: g6
+    dimension: tradeoff_selection
+    check: pattern_required
+    acceptable: [fail-closed]
+  - id: g7
+    dimension: tradeoff_selection
+    check: role_required
+    acceptable_roles: [system-of-record]
+    acceptable_components: [postgresql-16, mysql-8]
+  - id: g8
+    dimension: tradeoff_selection
+    check: role_forbidden
+    role: ingest-store
+    forbidden_components: [cassandra-4]
+  - id: g9
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
+    acceptable: [staleness-fallback, offline-first-sync, reconciliation-on-reconnect, heartbeat-timeout-detection]
+  - id: g10
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R5
+    acceptable: [admission-control]
+  - id: g11
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 8
+
+traps:
+  - id: T1
+    description: Propagate closures the same way as congestion — eventually consistent pub/sub, vehicles pick it up when they reconnect.
+    violated_constraint_id: C1
+    why_attractive: It is exactly how every consumer navigation stack handles road closures, it is one code path instead of two, and "eventually within seconds" sounds close enough — until a vehicle in a dead zone proceeds on a stale plan into a blast zone.
+  - id: T2
+    description: Make everything strongly consistent, including congestion, "since safety matters here".
+    violated_constraint_id: C2
+    why_attractive: Uniform strictness feels safe and simple. But strong consistency for 120/s advisory telemetry across a mesh network with dead zones couples ETA updates to availability for no safety gain — C3 explicitly licenses eventual congestion, and dead zones make strong-everything unworkable.
+  - id: T3
+    description: Deploy Cassandra for telemetry ingest "because time-series writes at fleet scale".
+    violated_constraint_id: C4
+    why_attractive: Vehicle telemetry pattern-matches to the wide-column ingest story. But the actual load is 120 writes/second and ~1 TB retained — three orders of magnitude below where Cassandra earns its operational cost for a 4-person team running two servers.
+
+twist:
+  description: >
+    A navigation backend where the consumer-maps consistency model is inverted:
+    the safety-critical fact (closures) demands strong, fail-closed handling
+    while the familiar telemetry fact (congestion) stays eventual — and the
+    scale is deliberately three orders of magnitude below the canon's.
+  invalidated_canonical: >
+    The consumer navigation canon (Waze/Google-Maps-style: all dynamic data
+    eventually consistent, fail-open, wide-column telemetry ingest) fails g1,
+    g2, and g8 here: eventual closures are a fatal safety violation, fail-open
+    is the wrong default, and canonical big-ingest storage is over-engineering
+    at 120 writes/second.
+  twist_gold_refs: [g1, g2, g8]
+
+gold_rationale: |
+  Mixed consistency is entailed, not stylistic. Closures (C1): the cost of a
+  stale closure read is a vehicle entering a blast area — the safety case
+  admits no propagation window, so closure state must be read strongly
+  (single authoritative source, confirmed delivery) and every ambiguity must
+  resolve to "blocked" (fail-closed, g2). The vehicle side is the same rule
+  under partition (C2): in a dead zone a vehicle cannot confirm closure
+  freshness, so beyond a bounded staleness window it must halt or hold at the
+  next beacon (g4/g5) rather than proceed on a cached plan — CAP resolved
+  toward consistency for the safety fact. Congestion (C3) is the mirror image:
+  advisory, tolerant of 60 s staleness, and produced by intermittently
+  connected sources, so coupling it to strong consistency (T2) sacrifices
+  availability under routine partitions for zero safety benefit — CAP resolved
+  toward availability for the advisory fact. One system, two consistency
+  choices, each entailed by its data's failure cost.
+
+  Right-sizing (g7, g8, T3): 120 writes/second and ~1 TB/90 days is roughly
+  0.1% of a single PostgreSQL server's comfortable write capacity; the tunnel
+  graph is 3,000 rows. Cassandra brings multi-node operational burden (repair,
+  compaction tuning, consistency-level reasoning) that C4's 4-person team pays
+  with no capacity need. Erroneous reports (R5/g10) are handled by validating
+  at the ingest boundary (admission control: beacon plausibility, rate limits
+  per vehicle) before reports influence congestion state.

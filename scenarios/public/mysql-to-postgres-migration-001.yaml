@@ -1,0 +1,202 @@
+# Zero-downtime store migration where the clean expand/contract canon breaks:
+# an 18-month tail of old mobile clients keeps writing through legacy API
+# semantics, so writers can never be drained. Continuous sync + long-lived
+# compatibility become mandatory; 2PC across the stores is the planted trap.
+instance_id: mysql-to-postgres-migration-001
+domain: data-migration
+difficulty: medium
+version: "0.1.0"
+split: public
+
+problem_statement: |
+  A consumer app's backend (24/7, globally used) stores all state in MySQL 8.
+  For organizational platform-standardization reasons that are not up for
+  debate, the data must move to PostgreSQL 16. There is no acceptable
+  maintenance window: the service must keep reading and writing throughout.
+
+  The complication: the app's mobile clients. Old app versions remain in the
+  wild for up to 18 months, and they write through legacy API endpoints whose
+  request semantics are coupled to the old MySQL schema shapes. Forcing
+  upgrades is not commercially acceptable; the legacy write paths must keep
+  working, at full fidelity, for the entire 18-month tail — including long
+  after the new store has become primary.
+
+  Compliance requires demonstrated data parity between stores before any
+  cutover, and a rollback path at every stage of the migration.
+
+  Design the migration: how data moves, how both write paths stay correct,
+  how parity is proven, how cutover happens, and how rollback works at each
+  stage. Team: 6 engineers. Dataset: ~500 GB, ~2,000 writes/second peak.
+
+context: |
+  All writes flow through the company's API tier (mobile clients do not open
+  database connections), but legacy endpoints assume old-schema semantics.
+  The API tier can be modified; mobile clients cannot.
+
+constraints:
+  - id: C1
+    type: availability
+    value: "zero downtime: reads and writes continue throughout the migration; no maintenance window"
+  - id: C2
+    type: compliance
+    value: "legacy client write paths (old API semantics) keep working at full fidelity for an 18-month tail; forcing upgrades is not acceptable"
+  - id: C3
+    type: compliance
+    value: "demonstrated data parity between old and new stores before cutover"
+  - id: C4
+    type: durability
+    value: "rollback path exists at every migration stage; no acknowledged write may be lost in either direction"
+  - id: C5
+    type: scale
+    value: "~500 GB dataset, ~2,000 writes/second peak"
+
+requirements:
+  - id: R1
+    text: All historical data moves from MySQL 8 to PostgreSQL 16.
+  - id: R2
+    text: Legacy-endpoint writes keep working at full fidelity for the 18-month tail.
+  - id: R3
+    text: Parity between stores is systematically verified before cutover.
+  - id: R4
+    text: Every migration stage can be rolled back.
+  - id: R5
+    text: The service never goes down.
+
+flows:
+  - id: sync_mechanism
+    description: How writes reach both stores while both matter.
+    decision_slots:
+      mechanism: [stop-the-world-dump-restore, continuous-sync-cdc-or-dual-write, distributed-transaction-across-both]
+  - id: cutover
+    description: How read/write primacy moves from MySQL to PostgreSQL.
+    decision_slots:
+      style: [big-bang-switch, gradual-flagged-cohorts]
+  - id: legacy_writes
+    description: How old-API writes are handled once PostgreSQL is primary.
+    decision_slots:
+      handling: [translate-at-api-boundary, reject-legacy-writes, keep-mysql-primary-forever]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: migration_safety
+    check: slot_match
+    flow: sync_mechanism
+    slot: mechanism
+    acceptable: [continuous-sync-cdc-or-dual-write]
+  - id: g2
+    dimension: migration_safety
+    check: pattern_required
+    acceptable: [cdc-replication, dual-write]
+  - id: g3
+    dimension: migration_safety
+    check: pattern_required
+    acceptable: [backfill]
+  - id: g4
+    dimension: migration_safety
+    check: pattern_required
+    acceptable: [data-verification-reconciliation]
+  - id: g5
+    dimension: migration_safety
+    check: pattern_required
+    acceptable: [rollback-plan]
+  - id: g6
+    dimension: migration_safety
+    check: pattern_required
+    acceptable: [versioned-api-compatibility, anti-corruption-layer]
+  - id: g7
+    dimension: migration_safety
+    check: slot_match
+    flow: cutover
+    slot: style
+    acceptable: [gradual-flagged-cohorts]
+  - id: g8
+    dimension: migration_safety
+    check: pattern_required
+    acceptable: [feature-flag-cutover, canary-release, shadow-reads]
+  - id: g9
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: legacy_writes
+    slot: handling
+    acceptable: [translate-at-api-boundary]
+  - id: g10
+    dimension: tradeoff_selection
+    check: pattern_forbidden
+    forbidden: [two-phase-commit]
+  - id: g11
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [data-verification-reconciliation, shadow-reads]
+  - id: g12
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
+    acceptable: [rollback-plan]
+  - id: g13
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 13
+
+traps:
+  - id: T1
+    description: Keep both stores consistent with distributed transactions (2PC/XA) spanning MySQL and PostgreSQL.
+    violated_constraint_id: C1
+    why_attractive: '"Both stores must agree" reads like a textbook atomic-commit problem, and 2PC is the textbook answer. But a blocking coordinator across heterogeneous stores makes every write''s availability the product of both databases plus the coordinator — under C1''s zero-downtime bar, adding a synchronous point of failure to 2,000 writes/second is the opposite of safe, and async sync with reconciliation achieves the actual goal (eventual parity with proof) without it.'
+  - id: T2
+    description: Dump-and-restore during a "brief" low-traffic window.
+    violated_constraint_id: C1
+    why_attractive: It is the simplest mental model of a migration and how every local-dev migration works. But 500 GB dump+restore+validate is hours of writes lost or blocked — there is no window, brief or otherwise, under C1.
+  - id: T3
+    description: Classic expand/contract with a deprecation deadline — after the transition period, old writers are retired and the old schema contracted away.
+    violated_constraint_id: C2
+    why_attractive: It is the canonical zero-downtime migration playbook and works when you control every writer. Here the 18-month uncontrollable client tail means "retire the old writers" is not available; contraction that breaks legacy semantics violates C2, so a long-lived translation layer at the API boundary is mandatory instead.
+
+twist:
+  description: >
+    A standard zero-downtime store migration with one inverted assumption: the
+    writers can never be drained. Old mobile clients keep writing old-schema
+    semantics for 18 months, far past cutover.
+  invalidated_canonical: >
+    The clean expand/contract migration playbook assumes you control all
+    writers and can retire the old write path on your schedule. Reciting it
+    fails g6 and g9: with an uncontrollable 18-month client tail, the design
+    must carry versioned API compatibility / an anti-corruption translation
+    layer at the API boundary for the entire tail, translating legacy-semantic
+    writes onto the new store after cutover.
+  twist_gold_refs: [g6, g9]
+
+gold_rationale: |
+  Why continuous sync (g1-g3, T2): at 500 GB and 2,000 writes/second with no
+  window (C1), the only viable shape is: bulk backfill of history while the
+  source stays live, plus a continuous change stream (CDC from MySQL binlog,
+  or application-level dual-write in the API tier — both defensible, hence the
+  acceptable set) keeping the target converged. Dump-and-restore requires a
+  write freeze measured in hours (500 GB restore + index rebuild + catch-up),
+  which C1 prices at infinity.
+
+  Why not 2PC (g10, T1): synchronous atomic commit across MySQL+PostgreSQL
+  makes every one of 2,000 writes/second depend on both stores and a
+  coordinator being simultaneously healthy — availability strictly worse than
+  either store alone, violating C1's spirit during the highest-risk period.
+  C3 does not require instantaneous mutual consistency; it requires PROVEN
+  parity before cutover, which async sync plus systematic reconciliation
+  (counts, checksums, sampled row diffs — g4, g11) delivers without coupling
+  availability.
+
+  Cutover and rollback (g7, g8, g5, g12): gradual flagged cohorts with shadow
+  reads bound the blast radius of semantic drift the reconciler missed; a
+  big-bang switch converts any missed defect into a full-population incident
+  with no C4 story. Rollback at every stage means the reverse sync path stays
+  active after cutover (new->old), so pointing flags back at MySQL remains
+  possible until the tail ends.
+
+  The tail (g6, g9, T3): legacy endpoints encode old-schema semantics and
+  cannot be removed for 18 months (C2). Post-cutover, those writes must be
+  translated at the API boundary onto the new schema (versioned API
+  compatibility / anti-corruption layer) — rejecting them violates C2, and
+  keeping MySQL primary forever means the migration never completes.

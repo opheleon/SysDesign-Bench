@@ -1,0 +1,162 @@
+# Easy floor item. Boring municipal CRUD at tiny scale with two sharp edges:
+# read-your-writes (which replicas and caches silently break) and auditor
+# point-in-time reconstruction. Every scaling-blog reflex is scored as
+# over-engineering.
+instance_id: permit-system-001
+domain: gov-records
+difficulty: easy
+version: "0.1.0"
+split: public
+
+problem_statement: |
+  A city is replacing its building-permit system. Clerks create and update
+  permit records; applicants view status. After a clerk saves a change, their
+  very next read — and any colleague's — must show that change: stale reads
+  cause double-issued permits and legal disputes, and are not acceptable at
+  any window.
+
+  State auditors additionally require point-in-time reconstruction: for any
+  permit, show exactly what the record contained at any past moment, for
+  seven years.
+
+  Scale, measured from the current system: 30,000 permits/year, 200 clerk
+  accounts, peak load 20 requests/second during Monday-morning rush. The IT
+  team is 3 developers who also maintain four other city systems.
+
+  Design the system: storage, read path, and how the audit requirement is met.
+
+context: |
+  Data size: seven years of permits with full history fits in well under
+  10 GB. Growth is flat. No seasonal spikes beyond the Monday rush already
+  included in the 20 rps figure.
+
+constraints:
+  - id: C1
+    type: consistency
+    value: "read-your-writes for all users with zero staleness window after a save"
+  - id: C2
+    type: scale
+    value: "20 requests/second peak; 30,000 permits/year; <10 GB total data"
+  - id: C3
+    type: compliance
+    value: "auditors can reconstruct any permit's exact contents at any past moment, 7-year retention"
+  - id: C4
+    type: team
+    value: "3 developers shared across five city systems; minimal operational surface"
+
+requirements:
+  - id: R1
+    text: Clerks create, update, and search permit records; applicants view status.
+  - id: R2
+    text: Any read after a save reflects the save (no stale reads).
+  - id: R3
+    text: Point-in-time reconstruction of any permit for auditors.
+  - id: R4
+    text: Seven-year history retention.
+
+flows:
+  - id: permit_reads
+    description: Where reads are served from.
+    decision_slots:
+      read_source: [primary, read-replica, cache-layer]
+      consistency: [strong, eventual]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: role_required
+    acceptable_roles: [system-of-record]
+    acceptable_components: [postgresql-16, mysql-8]
+  - id: g2
+    dimension: tradeoff_selection
+    check: role_forbidden
+    role: system-of-record
+    forbidden_components: [redis-7, memcached, cassandra-4]
+  - id: g3
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: permit_reads
+    slot: read_source
+    acceptable: [primary]
+  - id: g4
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: permit_reads
+    slot: consistency
+    acceptable: [strong]
+  - id: g5
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [temporal-audit-log]
+  - id: g6
+    dimension: tradeoff_selection
+    check: pattern_required
+    acceptable: [temporal-audit-log]
+  - id: g7
+    dimension: operability
+    check: pattern_forbidden
+    forbidden: [read-replicas, cache-aside, edge-caching, cdn-caching]
+  - id: g8
+    dimension: operability
+    check: pattern_forbidden
+    forbidden: [event-sourcing, cqrs, sharding, autoscaling, queue-load-leveling]
+  - id: g9
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 5
+
+traps:
+  - id: T1
+    description: Add read replicas and/or a caching layer on the read path "for performance and availability".
+    violated_constraint_id: C1
+    why_attractive: It is the default first move of every web-architecture article, and it feels like free robustness. But asynchronous replicas and caches introduce exactly the staleness window C1 forbids — and at 20 rps there is no load to offload in the first place.
+  - id: T2
+    description: Event sourcing / CQRS "since the auditors need history anyway".
+    violated_constraint_id: C4
+    why_attractive: Audit history genuinely is the event-sourcing sales pitch, so C3 pattern-matches to it. But temporal tables/audit triggers meet C3 with plain SQL, while event sourcing hands a 3-person shared team projections, rebuilds, and eventual-consistency bugs — and its read-model laig also collides with C1.
+  - id: T3
+    description: Choose a distributed NoSQL store for "future scale".
+    violated_constraint_id: C2
+    why_attractive: Nobody gets fired for planning for scale. But the stated ceiling (20 rps, <10 GB, flat growth) is three-plus orders of magnitude inside a single relational instance, and C1+C3 are precisely the guarantees relational primaries give for free.
+
+twist:
+  description: >
+    A deliberately boring problem whose stated numbers make the fashionable
+    answers wrong: the scale is tiny, the consistency bar is absolute, and the
+    audit requirement has a one-pattern SQL answer.
+  invalidated_canonical: >
+    The standard web-scale CRUD stack — primary plus read replicas plus cache,
+    or event-sourcing for auditability — is scored as a violation here (g7,
+    g8): replicas and caches break read-your-writes that C1 demands, and
+    CQRS/event-sourcing machinery at 20 rps for a 3-person team is
+    over-engineering the constraints forbid.
+  twist_gold_refs: [g7, g8]
+
+gold_rationale: |
+  Capacity math (g3, g7, g8, T1, T3): a single PostgreSQL/MySQL instance on
+  modest hardware sustains thousands of simple transactional requests per
+  second; the stated peak is 20 rps with <10 GB of data — roughly 0.5% of one
+  primary's comfortable capacity, with flat growth. Every scaling structure
+  (replicas, caches, shards, queues, autoscaling) therefore adds zero needed
+  capacity while adding staleness (violating C1's zero-window read-your-writes:
+  async replication and cache invalidation both create windows) and adding
+  operational surface (violating C4). Serving all reads from the strongly
+  consistent primary is entailed.
+
+  Audit (g5, g6, T2): C3 asks for point-in-time reconstruction, which temporal
+  tables / audit-log triggers provide natively in SQL databases — one pattern,
+  no new infrastructure, 7 years of <10 GB history is trivial retention.
+  Event sourcing also technically satisfies C3 but drags CQRS projections and
+  rebuild tooling into a 3-developer shop (C4) and reintroduces read staleness
+  (C1) via asynchronous read models — strictly dominated here.
+
+  Store choice (g1, g2): read-your-writes with zero window plus multi-row
+  transactional updates plus temporal history is the native guarantee set of a
+  single relational primary. Redis/Memcached lack the durability/transaction
+  profile for a legal system of record; Cassandra's tunable consistency and
+  absent multi-row ACID make C1 hard and buy capacity nobody asked for.

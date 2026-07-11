@@ -1,0 +1,65 @@
+# SysDesign-Bench missing-information taxonomy.
+# In clarify mode the model lists the keys it needs before it can design responsibly.
+# Graded as: gold-required keys ⊆ answer ⊆ gold-allowed keys.
+version: "0.1.0"
+missing_info:
+  - id: expected_read_qps
+    name: Expected read throughput
+    description: Sustained and peak read requests per second.
+  - id: expected_write_qps
+    name: Expected write throughput
+    description: Sustained and peak write requests per second.
+  - id: peak_to_average_ratio
+    name: Peak-to-average ratio
+    description: Traffic spikiness; ratio of peak to steady-state load.
+  - id: data_volume_total
+    name: Total data volume
+    description: Current dataset size.
+  - id: data_growth_rate
+    name: Data growth rate
+    description: Rate of dataset growth over time.
+  - id: object_size
+    name: Object/record size
+    description: Typical and maximum size of stored/transferred records.
+  - id: latency_target_read
+    name: Read latency target
+    description: Required read latency percentile targets.
+  - id: latency_target_write
+    name: Write latency target
+    description: Required write latency percentile targets.
+  - id: consistency_requirement
+    name: Consistency requirement
+    description: Required consistency model (linearizable, read-your-writes, eventual...).
+  - id: durability_requirement
+    name: Durability requirement
+    description: Tolerance for acknowledged-write loss.
+  - id: availability_target
+    name: Availability target
+    description: Required uptime / error budget.
+  - id: budget
+    name: Infrastructure budget
+    description: Cost ceiling for infrastructure and operations.
+  - id: team_size_expertise
+    name: Team size and expertise
+    description: Who builds and operates this, and what they already know.
+  - id: client_platforms
+    name: Client platforms
+    description: Web, mobile, desktop, embedded — and their constraints.
+  - id: geographic_distribution
+    name: Geographic distribution
+    description: Where users and infrastructure are located.
+  - id: regulatory_constraints
+    name: Regulatory constraints
+    description: Compliance, data residency, audit obligations.
+  - id: existing_system_details
+    name: Existing system details
+    description: Current architecture, schema, and data that must be preserved or migrated.
+  - id: migration_deadline
+    name: Migration deadline
+    description: Hard dates or windows for cutover.
+  - id: retention_policy
+    name: Retention policy
+    description: How long data must be kept and when it must be deleted.
+  - id: security_requirements
+    name: Security requirements
+    description: AuthN/AuthZ model, encryption, threat assumptions.

@@ -1,0 +1,196 @@
+# Minimal pair with permit-system-001: same CRUD surface, inverted constraints.
+# Spikes are ANNOUNCED and the budget is FLAT, so the universal recited answer
+# ("autoscale it") is a scored cost violation; the correct shape is scheduled
+# pre-provisioning + waiting room + queue, with strong consistency only where
+# overselling lives.
+instance_id: ticket-onsale-001
+domain: ticketing
+difficulty: medium
+version: "0.1.0"
+split: public
+
+problem_statement: |
+  A mid-size ticketing company sells event tickets. Sales open at announced
+  times ("on-sales"). At a typical big on-sale, ~50,000 purchase attempts
+  arrive in the first minute (~800/second), decaying over the next half hour.
+  Steady-state outside on-sales is ~5 requests/second.
+
+  Finance imposes a hard, flat infrastructure budget: capacity costs must be
+  the same every month regardless of the on-sale calendar, and usage-based
+  burst pricing is explicitly disallowed after last year's bill shock. The
+  budgeted fixed capacity handles roughly 100 requests/second of full
+  purchase processing.
+
+  An event's ticket inventory must never be oversold — every ticket is sold
+  exactly once. Availability displays ("~1,200 left") may lag reality by a
+  few seconds. Users who retry a failed or slow purchase must never be
+  double-charged or allocated duplicate tickets. During the first-minute
+  crush, users should wait in an orderly line rather than hammer refresh
+  against errors.
+
+  Design the on-sale architecture within the flat budget. Team: 5 engineers.
+
+context: |
+  Payment capture is handled by an external PSP; the design owns allocation,
+  ordering, and retry semantics around it. On-sale calendar is known weeks in
+  advance.
+
+constraints:
+  - id: C1
+    type: scale
+    value: "announced on-sales: ~800 purchase attempts/second first minute vs ~5/second steady state (160x spike, schedule known in advance)"
+  - id: C2
+    type: budget
+    value: "flat monthly infrastructure cost; usage-based burst/auto-scale pricing disallowed; fixed capacity ~100 rps of full purchase processing"
+  - id: C3
+    type: consistency
+    value: "tickets are never oversold: each ticket allocated exactly once; retried purchases never double-allocate or double-charge"
+  - id: C4
+    type: availability
+    value: "during the crush, users wait in an orderly line instead of receiving errors and retry-storming"
+
+requirements:
+  - id: R1
+    text: Sell an event's ticket inventory at announced on-sale times.
+  - id: R2
+    text: No ticket is ever sold twice; retried purchases are safe.
+  - id: R3
+    text: Availability displays may lag reality by a few seconds.
+  - id: R4
+    text: Absorb the first-minute crush within the flat budget, without error storms.
+  - id: R5
+    text: Users experience an ordered wait during the crush.
+
+flows:
+  - id: spike_absorption
+    description: How the 800 rps first-minute crush meets the ~100 rps fixed processing capacity.
+    decision_slots:
+      strategy: [autoscale-on-demand, fixed-capacity-with-queueing]
+  - id: allocation
+    description: Assigning specific tickets to specific buyers.
+    decision_slots:
+      consistency: [strong, eventual]
+  - id: availability_display
+    description: The "~N left" counter users see while browsing.
+    decision_slots:
+      consistency: [strong, eventual]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: spike_absorption
+    slot: strategy
+    acceptable: [fixed-capacity-with-queueing]
+  - id: g2
+    dimension: tradeoff_selection
+    check: pattern_forbidden
+    forbidden: [autoscaling]
+  - id: g3
+    dimension: tradeoff_selection
+    check: pattern_required
+    acceptable: [queue-load-leveling]
+  - id: g4
+    dimension: tradeoff_selection
+    check: pattern_required
+    acceptable: [virtual-waiting-room]
+  - id: g5
+    dimension: tradeoff_selection
+    check: pattern_required
+    acceptable: [scheduled-pre-provisioning]
+  - id: g6
+    dimension: operability
+    check: pattern_required
+    acceptable: [load-shedding, rate-limiting, admission-control]
+  - id: g7
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: allocation
+    slot: consistency
+    acceptable: [strong]
+  - id: g8
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: availability_display
+    slot: consistency
+    acceptable: [eventual]
+  - id: g9
+    dimension: operability
+    check: pattern_required
+    acceptable: [idempotency-keys]
+  - id: g10
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [idempotency-keys]
+  - id: g11
+    dimension: tradeoff_selection
+    check: role_required
+    acceptable_roles: [system-of-record]
+    acceptable_components: [postgresql-16, mysql-8]
+  - id: g12
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R5
+    acceptable: [virtual-waiting-room, queue-load-leveling]
+  - id: g13
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 10
+
+traps:
+  - id: T1
+    description: Autoscale out for the spike and back down afterward.
+    violated_constraint_id: C2
+    why_attractive: It is the universally recited answer to spiky traffic and what every cloud provider's tutorial teaches. But C2 disallows usage-based burst spend outright — and reactive scale-up lag (minutes) misses a first-minute crush whose start time was known weeks in advance anyway.
+  - id: T2
+    description: Make allocation eventually consistent "since the business accepted eventual consistency".
+    violated_constraint_id: C3
+    why_attractive: The prompt genuinely licenses eventual consistency for displays (R3), and extending it to allocation makes the whole system simpler and faster. But eventual allocation of a finite inventory under 800 rps contention IS overselling; the license applies to the counter, not the ledger.
+  - id: T3
+    description: Handle purchase retries by "deduplicating later in reconciliation".
+    violated_constraint_id: C3
+    why_attractive: Retry handling looks like an edge case next to the spike problem, and post-hoc reconciliation feels adequate. But the crush is precisely when timeouts and retries explode; without idempotency keys on purchase submission, double-charges and duplicate allocations happen at peak, in bulk.
+
+twist:
+  description: >
+    The standard spiky-traffic scenario with the standard answer disallowed:
+    spikes are announced (so elasticity buys nothing reactive scaling wouldn't
+    miss) and the budget is flat (so elasticity is forbidden by finance).
+  invalidated_canonical: >
+    "Autoscale to absorb the spike" — the default recitation for spiky load —
+    fails g1 and g2. The constraint set entails the opposite shape: fixed
+    pre-provisioned capacity (the calendar is known), a virtual waiting room
+    for orderly admission, queue-based load leveling into the ~100 rps
+    processing budget, and load shedding at the boundary.
+  twist_gold_refs: [g1, g2, g5]
+
+gold_rationale: |
+  Spike math (g1-g6): the crush is ~800 rps against ~100 rps of fixed
+  processing capacity — an 8x overhang for roughly a minute, decaying over
+  30 minutes. Total first-minute arrivals ~50,000; processed in-line at
+  100 rps, the backlog clears in under 10 minutes if arrivals are held in an
+  ordered queue and admitted at capacity (queue-load-leveling + virtual
+  waiting room), which also satisfies R5's orderly-line UX and prevents the
+  retry storm C4 forbids (boundary admission control / shedding above queue
+  capacity). Autoscaling (T1/g2) is doubly excluded: C2 forbids the spend
+  model, and reactive scaling's 1-3 minute provisioning lag arrives after a
+  known-in-advance first-minute peak — scheduled pre-provisioning (g5) uses
+  the same calendar knowledge at flat cost.
+
+  Consistency split (g7, g8, T2): allocation decrements a finite inventory
+  under maximal contention; any staleness window between read and allocate at
+  800 rps produces duplicate sales, so allocation is strongly consistent
+  transactional work on the system of record (g11). The availability counter
+  is explicitly staleness-tolerant (R3) — serving it eventually consistent
+  removes the hottest read from the transactional path. Same system, opposite
+  consistency choices, each entailed.
+
+  Retry safety (g9, g10, T3): under crush conditions, client timeouts make
+  retries the common case, not the edge case. An idempotency key per purchase
+  intent makes retried submissions safe (exactly-one allocation/charge per
+  intent, C3); post-hoc reconciliation concedes double-charges at peak volume.

@@ -1,0 +1,108 @@
+# Clarification variant of ticket-onsale-001: the same problem with its
+# load-bearing numbers deleted. The design hinges entirely on spike magnitude
+# vs. budget; a model that designs anyway on silent assumptions fails via
+# mode-gating. Minimal pair discipline: the surface is nearly identical to the
+# design-mode sibling.
+instance_id: ticket-onsale-clarify-001
+domain: ticketing
+difficulty: medium
+version: "0.1.0"
+split: public
+
+problem_statement: |
+  A mid-size ticketing company sells event tickets. Sales open at announced
+  times ("on-sales"), and traffic during an on-sale is dramatically higher
+  than steady state — the operations team describes it as "a wall of traffic
+  the moment sales open". Finance has signaled that infrastructure spending
+  is constrained and that last year's cloud bill caused problems, but the
+  actual budget policy is still being negotiated.
+
+  An event's ticket inventory must never be oversold — every ticket is sold
+  exactly once. Availability displays may lag reality by a few seconds.
+  Users who retry a failed purchase must never be double-charged.
+
+  Leadership wants an architecture proposal now. Design the on-sale
+  architecture — or, if information critical to the architectural choice is
+  missing, say exactly what you need.
+
+context: |
+  Payment capture is handled by an external PSP. The on-sale calendar is
+  known weeks in advance. No load measurements have been shared with you, and
+  the budget negotiation has not concluded.
+
+constraints:
+  - id: C1
+    type: scale
+    value: "spiky on-sale traffic of unstated magnitude ('a wall of traffic'); no measured peak or steady-state figures provided"
+    stated_in_prompt: false
+  - id: C2
+    type: budget
+    value: "budget constrained but the policy (flat cap? burst allowance? ceiling figure?) is unresolved"
+    stated_in_prompt: false
+  - id: C3
+    type: consistency
+    value: "tickets never oversold; retried purchases never double-charge"
+
+requirements:
+  - id: R1
+    text: Sell an event's ticket inventory at announced on-sale times.
+  - id: R2
+    text: No ticket is ever sold twice; retried purchases are safe.
+  - id: R3
+    text: Availability displays may lag reality by a few seconds.
+
+flows: []
+
+relaxation_options: []
+
+expected_mode: clarify
+
+gold:
+  - id: g1
+    dimension: clarification_seeking
+    check: missing_info
+    required: [expected_write_qps, budget]
+    allowed: [expected_write_qps, budget, expected_read_qps, peak_to_average_ratio, availability_target]
+
+traps:
+  - id: T1
+    description: Design the architecture anyway, silently assuming a spike magnitude and a budget model.
+    violated_constraint_id: C1
+    why_attractive: The scenario looks exactly like the standard spiky-ticketing problem with a standard answer, and leadership asked for a proposal "now". But whether the answer is autoscaling, fixed capacity plus a waiting room, or a plain monolith depends entirely on the numbers that are missing — a confident design here is an assumption wearing an architecture costume.
+  - id: T2
+    description: Ask a laundry list of every conceivable question (team size, security posture, retention policy, client platforms...).
+    violated_constraint_id: C2
+    why_attractive: If asking is good, asking more feels safer and more thorough. But indiscriminate question-spam pushes the decision back to the requester without identifying what actually gates the architecture; the gate here is load magnitude and budget policy, nothing else.
+
+twist:
+  description: >
+    The design-mode sibling of this scenario (same surface) has its two
+    load-bearing numbers deleted; the correct behavior flips from designing to
+    asking, and asking precisely.
+  invalidated_canonical: >
+    Reciting the standard spiky-traffic ticketing architecture — in any
+    variant — fails here via mode-gating: without the spike magnitude and the
+    budget policy, the choice between autoscaling, pre-provisioned capacity
+    with queueing, or no special machinery at all is undetermined, and a
+    confident design is the failure mode being tested.
+  twist_gold_refs: [g1]
+
+gold_rationale: |
+  Why the two required keys gate everything: the architectural fork in the
+  design-mode sibling (ticket-onsale-001) is decided entirely by (a) the spike
+  magnitude relative to affordable fixed capacity — expected_write_qps — and
+  (b) whether spend may scale with load — budget. With a flat budget and an
+  8x overhang, the entailed answer is pre-provisioning + waiting room + queue;
+  with burst spend allowed and a modest spike, autoscaling is legitimate; with
+  a peak a single primary absorbs, neither is justified (parsimony). Since the
+  correct architectures under plausible values of the missing facts are
+  MUTUALLY EXCLUSIVE, no responsible design exists yet, and clarify is the
+  only correct mode.
+
+  Why the allowed set is small (T2): read volume, peak-to-average shape, and
+  an availability target plausibly refine the same capacity decision, so they
+  are tolerated. Team size, security posture, retention, client platforms do
+  not gate this fork — including them signals question-spam, and the grader's
+  allowed-set check fails it. C3 (overselling, retry safety) is fully stated
+  and gates nothing: it holds under every architecture variant, which is why
+  asking about consistency is not in the allowed set either.

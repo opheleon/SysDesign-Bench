@@ -1,0 +1,26 @@
+# Held-out split is never published
+scenarios/heldout/
+
+# Run outputs
+results/
+predictions*.jsonl
+scores*.json
+
+# Secrets
+.env
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

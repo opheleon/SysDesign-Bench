@@ -1,0 +1,191 @@
+# De-labeled market maker with the HFT canon inverted: no colocation, jittery WAN,
+# lossy UDP feed. The speed race is unwinnable, so speed-race machinery is a trap;
+# the scored substance is behaving correctly under degraded market data.
+instance_id: quoting-engine-flaky-feed-001
+domain: market-quoting
+difficulty: hard
+version: "0.1.0"
+split: public
+
+problem_statement: |
+  A small trading firm continuously posts buy and sell quotes on a regional
+  commodities venue. The venue does not offer colocation — the firm connects
+  from its own data center, with a measured round-trip of 20–40 ms (jittery) to
+  the venue. Market data is delivered as UDP multicast with sequence numbers on
+  every message; measured packet loss ranges 0.1–1%. The venue publishes the
+  same data on two redundant multicast feeds (A and B) with independent network
+  paths. Order entry is a separate reliable session protocol provided by the
+  venue and is not part of this design problem.
+
+  The firm's risk policy is absolute: never post or maintain quotes based on
+  market data that may be missing updates or is older than 250 ms. Regulators
+  additionally require pre-trade risk checks on every outbound order and a
+  complete, reconstructible record of every quote decision.
+
+  Larger competitors ARE colocated at the venue with microsecond-scale
+  tick-to-trade. The firm's leadership understands they cannot win speed races
+  and expects the budget to reflect that.
+
+  Design the quoting engine's market-data handling, safety behavior, and
+  persistence. The firm has 5 engineers and a modest infrastructure budget.
+
+context: |
+  Message rate: ~10,000 market-data messages/second at peak. Quote update
+  decisions are made in software on commodity servers. The venue's A and B
+  feeds each carry the full data stream.
+
+constraints:
+  - id: C1
+    type: network
+    value: "no colocation; 20-40 ms jittery RTT to the venue; UDP multicast market data with 0.1-1% packet loss"
+  - id: C2
+    type: compliance
+    value: "never quote on market data that may be missing updates or is older than 250 ms"
+  - id: C3
+    type: compliance
+    value: "pre-trade risk checks on every outbound order; complete reconstructible record of every quote decision"
+  - id: C4
+    type: budget
+    value: "5 engineers, modest infrastructure budget; leadership explicitly declines the speed-race arms race"
+
+requirements:
+  - id: R1
+    text: Maintain two-sided quotes driven by live market data.
+  - id: R2
+    text: Detect when market data is incomplete or stale and react safely.
+  - id: R3
+    text: An operator can instantly halt all quoting.
+  - id: R4
+    text: Every quote decision and outbound order is durably recorded for reconstruction.
+    implicit: true
+  - id: R5
+    text: Every outbound order passes pre-trade risk limits before leaving the firm.
+    implicit: true
+
+flows:
+  - id: market_data
+    description: Ingesting the venue's lossy UDP multicast feeds and deciding quote updates.
+    decision_slots:
+      staleness_policy: [quote-through-gaps, widen-or-pull-on-staleness]
+      feed_strategy: [single-feed, arbitrate-both-feeds]
+  - id: decision_audit
+    description: Recording quote decisions and orders for regulatory reconstruction.
+    decision_slots:
+      hot_path_coupling: [synchronous-blocking-quote-path, buffered-durable-off-path]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: pattern_required
+    acceptable: [gap-detection]
+  - id: g2
+    dimension: tradeoff_selection
+    check: pattern_required
+    acceptable: [staleness-fallback]
+  - id: g3
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: market_data
+    slot: staleness_policy
+    acceptable: [widen-or-pull-on-staleness]
+  - id: g4
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: market_data
+    slot: feed_strategy
+    acceptable: [arbitrate-both-feeds]
+  - id: g5
+    dimension: tradeoff_selection
+    check: pattern_required
+    acceptable: [ab-feed-arbitration]
+  - id: g6
+    dimension: operability
+    check: pattern_required
+    acceptable: [kill-switch]
+  - id: g7
+    dimension: tradeoff_selection
+    check: pattern_forbidden
+    forbidden: [kernel-bypass-networking, hardware-acceleration-fpga]
+  - id: g8
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
+    acceptable: [append-only-log, temporal-audit-log, write-ahead-log]
+  - id: g9
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R5
+    acceptable: [admission-control]
+  - id: g10
+    dimension: operability
+    check: slot_match
+    flow: decision_audit
+    slot: hot_path_coupling
+    acceptable: [buffered-durable-off-path]
+  - id: g11
+    dimension: tradeoff_selection
+    check: role_required
+    acceptable_roles: [cold-path-persistence, system-of-record, ingest-store, message-queue]
+    acceptable_components: [postgresql-16, mysql-8, kafka]
+  - id: g12
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 10
+
+traps:
+  - id: T1
+    description: Kernel-bypass networking and/or FPGA acceleration to "minimize latency".
+    violated_constraint_id: C4
+    why_attractive: It is the canonical trading-systems answer; every HFT blog post recommends it. But saving 20-50 microseconds against a 20,000-40,000 microsecond jittery WAN RTT buys nothing, and colocated competitors win the race regardless — it is pure cost with no benefit, which C4 explicitly declines.
+  - id: T2
+    description: Keep quoting through detected feed gaps or staleness ("the market moves fast; a few missing ticks won't matter").
+    violated_constraint_id: C2
+    why_attractive: Pulling quotes costs revenue and reconnecting/recovering takes time; quoting through feels pragmatic. But at 10k msgs/s and 0.1-1% loss, gaps occur constantly, and quoting on a book with phantom state is exactly what the risk policy forbids.
+  - id: T3
+    description: Synchronously commit every quote decision to a remote database inside the quote-update path.
+    violated_constraint_id: C1
+    why_attractive: '"Audit means write to the database first" is the safe-sounding reading of C3 — but a synchronous remote commit per decision at 10k msgs/s couples quoting latency to the database and adds nothing for reconstruction that a locally durable buffered log does not provide.'
+
+twist:
+  description: >
+    The trading-system scenario arrives with the speed race explicitly
+    unwinnable (no colocation, 20-40 ms jitter) and a lossy feed, so the scored
+    substance shifts from latency engineering to correctness under degraded
+    market data.
+  invalidated_canonical: >
+    The HFT canon — kernel bypass, FPGA acceleration, microsecond obsession —
+    is scored as forbidden over-engineering here (g7), and the canon's silence
+    on feed-gap handling fails g1-g5: reciting a low-latency trading
+    architecture without gap detection, staleness fallback, and A/B arbitration
+    fails the majority of this scenario's items.
+  twist_gold_refs: [g1, g2, g3, g7]
+
+gold_rationale: |
+  Speed math (g7, T1): colocated competitors operate at ~1-10 microsecond
+  tick-to-trade. The firm's floor is the WAN RTT: 20-40 ms = 20,000-40,000
+  microseconds, dominated by propagation and jitter. Kernel bypass saves
+  ~20-50 microseconds per packet — 0.1-0.25% of the budget — and FPGA gains are
+  similarly irrelevant at this distance. The race is lost by four orders of
+  magnitude before software starts; spending against it violates C4.
+
+  Gap math (g1-g5, T2): at 10,000 msgs/s with 0.1-1% loss, expect 10-100 lost
+  messages per second per feed. Sequence-number gap detection is therefore not
+  an edge case but a continuous operating condition. Independent A/B paths make
+  simultaneous loss of the same message approximately the product of the loss
+  rates (~1e-6 to 1e-4), so arbitrating both feeds cuts effective gaps by 2-4
+  orders of magnitude. When a gap or >250 ms staleness is detected anyway, C2
+  admits exactly one behavior: stop trusting the book — widen or pull quotes
+  (staleness-fallback) until recovery. Quoting through gaps is a direct C2
+  violation.
+
+  Audit placement (g8, g10, g11, T3): C3 requires complete reconstruction, not
+  synchronous remote commits. A locally durable append-only/WAL-style record
+  drained to cold-path storage preserves completeness; a synchronous remote DB
+  write per decision at 10k msgs/s adds a network dependency to the quote path
+  (C1) with no completeness gain. Pre-trade risk checks (g9) are admission
+  control at the order boundary and are the one thing that must sit
+  synchronously in the outbound path — which is why the audit write must not.

@@ -1,0 +1,407 @@
+# SysDesign-Bench pattern catalog.
+# One global catalog shown verbatim to the model in every scenario — per-scenario
+# hint leakage is impossible because the menu never changes. Additions are versioned
+# and additive, and must cite the documented property that makes them checkable.
+version: "0.1.0"
+patterns:
+  # ============ data ============
+  - id: cache-aside
+    name: Cache-aside
+    category: data
+    description: Application reads through a cache, populating it on miss; explicit invalidation on write.
+  - id: write-through-cache
+    name: Write-through cache
+    category: data
+    description: Writes go to cache and store synchronously; cache is never stale relative to the store.
+  - id: write-behind-cache
+    name: Write-behind cache
+    category: data
+    description: Writes buffered in cache and flushed asynchronously; risks loss on failure.
+  - id: read-replicas
+    name: Read replicas
+    category: data
+    description: Asynchronous replicas serve reads; replica reads may be stale.
+  - id: sharding
+    name: Sharding
+    category: data
+    description: Horizontal partitioning of data across nodes by key.
+  - id: range-partitioning
+    name: Range partitioning
+    category: data
+    description: Partitioning by contiguous key ranges; supports range scans, risks hot ranges.
+  - id: hash-partitioning
+    name: Hash partitioning
+    category: data
+    description: Partitioning by key hash; even spread, no efficient range scans.
+  - id: event-sourcing
+    name: Event sourcing
+    category: data
+    description: State stored as an append-only event log; current state derived by replay.
+  - id: cqrs
+    name: CQRS
+    category: data
+    description: Separate write model and read model, synchronized asynchronously.
+  - id: materialized-views
+    name: Materialized views
+    category: data
+    description: Precomputed query results refreshed on schedule or by trigger.
+  - id: temporal-audit-log
+    name: Temporal / audit log
+    category: data
+    description: Immutable history enabling point-in-time reconstruction of any record.
+  - id: soft-deletes
+    name: Soft deletes
+    category: data
+    description: Rows marked deleted rather than removed; preserves history and referential integrity.
+  - id: outbox
+    name: Transactional outbox
+    category: data
+    description: Events written in the same transaction as state, relayed asynchronously; avoids dual-write inconsistency between DB and broker.
+  - id: ttl-expiry
+    name: TTL expiry
+    category: data
+    description: Data expires automatically after a time-to-live.
+  - id: denormalization
+    name: Denormalization
+    category: data
+    description: Redundant storage shaped to read patterns, traded against write complexity.
+  - id: secondary-indexes
+    name: Secondary indexes
+    category: data
+    description: Additional indexes serving non-primary-key queries.
+  - id: geospatial-index
+    name: Geospatial index
+    category: data
+    description: Spatial indexing (R-tree/geohash) for location queries.
+  - id: time-series-rollups
+    name: Time-series rollups
+    category: data
+    description: Progressive aggregation of high-resolution data into coarser windows.
+  - id: polyglot-persistence
+    name: Polyglot persistence
+    category: data
+    description: Different stores for different data shapes/roles within one system.
+  - id: append-only-log
+    name: Append-only log
+    category: data
+    description: Sequential immutable writes as the primary storage structure.
+
+  # ============ migration ============
+  - id: expand-contract
+    name: Expand/contract schema change
+    category: migration
+    description: Additive schema change first, dual-compatible period, contraction after all writers/readers move.
+  - id: dual-write
+    name: Dual-write
+    category: migration
+    description: Writes applied to old and new stores during transition.
+  - id: cdc-replication
+    name: CDC replication
+    category: migration
+    description: Change-data-capture streams source changes to the target store continuously.
+  - id: backfill
+    name: Backfill
+    category: migration
+    description: Bulk copy of historical data into the new store, resumable and rate-limited.
+  - id: shadow-reads
+    name: Shadow reads
+    category: migration
+    description: Reads served from old store while the new store is queried in parallel and compared.
+  - id: dark-launch
+    name: Dark launch
+    category: migration
+    description: New path exercised with production traffic without affecting responses.
+  - id: feature-flag-cutover
+    name: Feature-flag cutover
+    category: migration
+    description: Traffic shifted between old and new paths via runtime flags, gradually and reversibly.
+  - id: blue-green-deployment
+    name: Blue-green deployment
+    category: migration
+    description: Two full environments; cutover by switching traffic, rollback by switching back.
+  - id: canary-release
+    name: Canary release
+    category: migration
+    description: New version exposed to a small traffic fraction before full rollout.
+  - id: rollback-plan
+    name: Rollback plan
+    category: migration
+    description: Explicit, tested procedure to revert to the previous state at any migration stage.
+  - id: data-verification-reconciliation
+    name: Data verification / reconciliation
+    category: migration
+    description: Systematic comparison of old and new stores (counts, checksums, sampled rows) before cutover.
+  - id: strangler-fig
+    name: Strangler fig
+    category: migration
+    description: Incremental replacement of a legacy system by routing slices of functionality to the new one.
+  - id: anti-corruption-layer
+    name: Anti-corruption layer
+    category: migration
+    description: Translation boundary isolating a new model from a legacy model.
+  - id: versioned-api-compatibility
+    name: Versioned API compatibility
+    category: migration
+    description: Old and new API/schema versions supported simultaneously for slow-upgrading clients.
+  - id: bidirectional-sync
+    name: Bidirectional sync
+    category: migration
+    description: Changes propagate both ways between old and new stores while both accept writes.
+
+  # ============ traffic ============
+  - id: queue-load-leveling
+    name: Queue-based load leveling
+    category: traffic
+    description: Queue absorbs bursts; consumers process at sustainable rate.
+  - id: virtual-waiting-room
+    name: Virtual waiting room
+    category: traffic
+    description: Excess users held in an ordered queue outside the core system during demand spikes.
+  - id: load-shedding
+    name: Load shedding
+    category: traffic
+    description: Deliberately rejecting excess load to protect the system.
+  - id: rate-limiting
+    name: Rate limiting
+    category: traffic
+    description: Per-client/tenant request caps.
+  - id: autoscaling
+    name: Autoscaling
+    category: traffic
+    description: Automatic capacity adjustment in response to observed load; costs scale with demand.
+  - id: scheduled-pre-provisioning
+    name: Scheduled pre-provisioning
+    category: traffic
+    description: Capacity provisioned ahead of known demand windows.
+  - id: backpressure
+    name: Backpressure
+    category: traffic
+    description: Downstream saturation propagates upstream, slowing producers instead of buffering unboundedly.
+  - id: bounded-queues
+    name: Bounded queues
+    category: traffic
+    description: Queues with explicit capacity limits and defined overflow behavior.
+  - id: circuit-breaker
+    name: Circuit breaker
+    category: traffic
+    description: Failing dependency calls short-circuited until the dependency recovers.
+  - id: bulkhead
+    name: Bulkhead
+    category: traffic
+    description: Resource pools isolated per dependency/tenant so one failure cannot exhaust everything.
+  - id: cdn-caching
+    name: CDN caching
+    category: traffic
+    description: Static/cacheable content served from edge networks.
+  - id: edge-caching
+    name: Edge caching
+    category: traffic
+    description: Application data cached geographically close to users; introduces staleness.
+  - id: request-coalescing
+    name: Request coalescing
+    category: traffic
+    description: Concurrent identical requests deduplicated into one upstream call.
+  - id: batch-processing
+    name: Batch processing
+    category: traffic
+    description: Work accumulated and processed in bulk off the request path.
+  - id: priority-queues
+    name: Priority queues
+    category: traffic
+    description: Work classes processed by priority under contention.
+  - id: admission-control
+    name: Admission control
+    category: traffic
+    description: Requests validated/limited at the boundary before consuming internal resources.
+
+  # ============ realtime ============
+  - id: udp-custom-reliability
+    name: UDP with custom reliability
+    category: realtime
+    description: Unreliable datagrams with application-level acks/retransmission where needed; avoids TCP head-of-line blocking.
+  - id: tcp-streaming
+    name: TCP streaming
+    category: realtime
+    description: Reliable ordered byte stream; head-of-line blocking under loss.
+  - id: websocket-push
+    name: WebSocket push
+    category: realtime
+    description: Bidirectional messaging over a persistent TCP connection.
+  - id: server-sent-events
+    name: Server-sent events
+    category: realtime
+    description: One-way server-to-client event stream over HTTP.
+  - id: long-polling
+    name: Long polling
+    category: realtime
+    description: Client holds a request open awaiting data; fallback transport.
+  - id: client-prediction
+    name: Client-side prediction
+    category: realtime
+    description: Client simulates ahead of server confirmation to hide latency.
+  - id: server-reconciliation
+    name: Server reconciliation
+    category: realtime
+    description: Client state corrected against authoritative server state on divergence.
+  - id: lag-compensation
+    name: Lag compensation
+    category: realtime
+    description: Server rewinds state to a client's view time when validating time-sensitive actions.
+  - id: deterministic-lockstep
+    name: Deterministic lockstep
+    category: realtime
+    description: All peers simulate identical deterministic steps from identical inputs; requires bit-exact determinism.
+  - id: snapshot-interpolation
+    name: Snapshot interpolation
+    category: realtime
+    description: Clients render interpolated states between received authoritative snapshots.
+  - id: delta-compression
+    name: Delta compression
+    category: realtime
+    description: Only state changes since the last acknowledged state are transmitted.
+  - id: interest-management
+    name: Interest management
+    category: realtime
+    description: Each client receives only state relevant to it (area-of-interest filtering).
+  - id: tick-based-simulation
+    name: Tick-based simulation
+    category: realtime
+    description: Fixed-rate authoritative simulation steps decoupled from render rate.
+  - id: input-log-replay
+    name: Input log & replay
+    category: realtime
+    description: Recorded input streams reproduce a session exactly on a deterministic simulation.
+  - id: server-authoritative-state
+    name: Server-authoritative state
+    category: realtime
+    description: Server owns truth; clients submit intents, never state.
+  - id: reliable-multicast
+    name: Reliable multicast with gap-fill
+    category: realtime
+    description: One-to-many datagram distribution with sequence numbers and a recovery channel for gaps.
+
+  # ============ reliability ============
+  - id: idempotency-keys
+    name: Idempotency keys
+    category: reliability
+    description: Client-supplied keys make retried writes safe to apply once.
+  - id: retries-with-backoff
+    name: Retries with backoff and jitter
+    category: reliability
+    description: Bounded retries with exponential backoff; requires idempotent targets.
+  - id: saga
+    name: Saga
+    category: reliability
+    description: Multi-step distributed operation as compensable local transactions.
+  - id: two-phase-commit
+    name: Two-phase commit
+    category: reliability
+    description: Atomic multi-participant commit; blocks on coordinator failure.
+  - id: dead-letter-queue
+    name: Dead-letter queue
+    category: reliability
+    description: Messages failing repeated processing parked for inspection instead of poisoning the stream.
+  - id: kill-switch
+    name: Kill switch
+    category: reliability
+    description: Instant, human-operable halt of an automated subsystem.
+  - id: quorum-writes
+    name: Quorum reads/writes
+    category: reliability
+    description: Operations acknowledged by a node majority; consistency depends on R+W>N configuration.
+  - id: leader-election
+    name: Leader election
+    category: reliability
+    description: Single writer chosen among replicas via consensus.
+  - id: health-checks-heartbeats
+    name: Health checks & heartbeats
+    category: reliability
+    description: Liveness/readiness signals driving traffic routing and failover.
+  - id: graceful-degradation
+    name: Graceful degradation
+    category: reliability
+    description: Reduced functionality under partial failure instead of full outage.
+  - id: exactly-once-processing
+    name: Exactly-once processing
+    category: reliability
+    description: Effectively-once effects via dedup/transactional sinks over at-least-once delivery.
+  - id: at-least-once-with-dedup
+    name: At-least-once with dedup
+    category: reliability
+    description: Redelivery accepted; consumers deduplicate by message identity.
+  - id: write-ahead-log
+    name: Write-ahead log
+    category: reliability
+    description: Mutations logged durably before being applied.
+  - id: distributed-lock
+    name: Distributed lock / lease
+    category: reliability
+    description: Mutual exclusion across processes via expiring leases.
+  - id: chaos-testing
+    name: Chaos testing
+    category: reliability
+    description: Deliberate fault injection in production-like conditions to verify resilience.
+
+  # ============ performance ============
+  - id: kernel-bypass-networking
+    name: Kernel-bypass networking
+    category: performance
+    description: User-space network stacks (DPDK/io_uring-class) shaving tens of microseconds per packet.
+  - id: hardware-acceleration-fpga
+    name: Hardware acceleration (FPGA/ASIC)
+    category: performance
+    description: Latency-critical logic in hardware; microsecond-scale gains at high build/ops cost.
+  - id: single-threaded-hot-path
+    name: Single-threaded hot path
+    category: performance
+    description: One pinned thread owns hot-path state; no locks or cross-core coordination on the critical path.
+  - id: memory-pooling
+    name: Memory pooling / zero-allocation hot path
+    category: performance
+    description: Preallocated buffers eliminate allocator/GC pauses on the critical path.
+
+  # ============ degraded-info ============
+  - id: gap-detection
+    name: Gap detection
+    category: degraded-info
+    description: Sequence numbers expose missing messages in a feed.
+  - id: staleness-fallback
+    name: Staleness fallback
+    category: degraded-info
+    description: Behavior switches to a conservative mode when input data exceeds a staleness bound.
+  - id: ab-feed-arbitration
+    name: A/B feed arbitration
+    category: degraded-info
+    description: Two redundant feeds consumed in parallel; first-arriving or gap-free data wins.
+  - id: fail-closed
+    name: Fail closed
+    category: degraded-info
+    description: On uncertainty or failure, deny/halt the action (safety over availability).
+  - id: fail-open
+    name: Fail open
+    category: degraded-info
+    description: On uncertainty or failure, allow the action (availability over safety).
+  - id: crdt
+    name: CRDTs
+    category: degraded-info
+    description: Conflict-free replicated data types merge concurrent updates deterministically.
+  - id: last-write-wins
+    name: Last-write-wins
+    category: degraded-info
+    description: Concurrent updates resolved by timestamp; silently discards conflicting writes.
+  - id: vector-clocks
+    name: Vector clocks
+    category: degraded-info
+    description: Causality tracking to detect (not resolve) concurrent updates.
+  - id: offline-first-sync
+    name: Offline-first sync
+    category: degraded-info
+    description: Clients operate on local state and reconcile when connectivity returns.
+  - id: reconciliation-on-reconnect
+    name: Reconciliation on reconnect
+    category: degraded-info
+    description: Full or incremental state resync after a connectivity gap.
+  - id: heartbeat-timeout-detection
+    name: Heartbeat timeout detection
+    category: degraded-info
+    description: Missing heartbeats mark a source stale/dead after a bounded window.
