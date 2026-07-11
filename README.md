@@ -100,7 +100,7 @@ gitignored and must be backed up in a private store.
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | claude-fable-5 | **92%** | 100% | 100% | 100% | 100% | 100% | 50% | 96% | 99% | 100% | 100% | $6.67 | 25 min |
 | grok-4.5 | **88%** | 100% | 100% | 100% | 100% | 100% | 24% | 94% | 99% | 100% | 100% | $1.17¹ | 15 min |
-| gpt-5.6-sol | **81%** | 98% | 50% | 75% | 100% | 100% | 47% | 94% | 99% | 100% | 100% | ~$5² | 50 min |
+| gpt-5.6-sol | **81%** | 98% | 50% | 75% | 100% | 100% | 47% | 94% | 99% | 100% | 100% | $8.33² | 78 min |
 | claude-opus-4-8 | **75%** | 98% | 0% | 100% | 100% | 100% | 32% | 95% | 100% | 95% | 100% | $4.21 | 30 min |
 | GLM-5.2 (Baseten) | **72%** | 96% | 0% | 75% | 100% | 92% | 47% | 90% | 98% | 92% | 100% | $1.00 | 19 min |
 
@@ -111,7 +111,7 @@ mode-defining answer checks only (decision slots, conflict sets, missing-info
 sets) — "did the model actually solve it." **Overall** macro-averages all
 dimensions — "would you want it designing systems you operate."
 ¹ xAI console figure; recorded value predated the reasoning-token accounting
-fix. ² gpt-5.6-sol run interrupted once and topped up via targeted rerun.
+fix. ² gpt-5.6-sol includes a $0.95 redundant top-up: the original run was misdiagnosed as dead while merely slow; graded records verified duplicate-free.
 
 Headline findings:
 - **Architectural correctness is saturated at high effort**: every model
