@@ -2,7 +2,7 @@
 
 **A fully deterministic benchmark for system design from requirements.**
 
-LLMs are benchmarked extensively on writing code — and barely at all on the decisions that
+LLMs are benchmarked extensively on writing code, and barely at all on the decisions that
 happen *before* code: choosing an architecture from requirements, making tradeoffs the
 constraints actually entail, refusing to design what physics forbids, asking when critical
 information is missing, and migrating live data without downtime. Those are the expensive
@@ -14,10 +14,10 @@ the grading path**.
 Each scenario gives the model a requirements document with numbered constraints and
 requirements, plus three global, version-pinned catalogs: a **component menu** (databases,
 brokers, caches, languages), a **pattern catalog** (~100 architectural and data patterns),
-and a **role taxonomy**. The model responds with one structured JSON **design spec** — not a
+and a **role taxonomy**. The model responds with one structured JSON **design spec**, not a
 prose essay:
 
-- `mode` — `design`, `infeasible`, or `clarify`
+- `mode`: `design`, `infeasible`, or `clarify`
 - `design` mode: components with roles, selected patterns, per-flow decisions
   (consistency, transport, storage) for decision slots the scenario defines, and a
   coverage map linking every requirement ID to the choice that addresses it
@@ -47,24 +47,24 @@ model's **format-compliance rate** (how often its spec validated) reported along
 ## Philosophy
 
 1. **Deterministic or it doesn't ship.** Respected benchmarks grade deterministically
-   wherever the task allows — SWE-bench executes test suites, τ-bench compares final state,
+   wherever the task allows: SWE-bench executes test suites, τ-bench compares final state,
    BFCL matches structured calls, IFEval runs programmatic checks, LiveBench is judge-free
    by design. Holistic LLM-judge scoring has documented biases and no place here. Our rule
    is enforced by the validator: a checklist item that cannot be expressed as a set check
    is not a valid item.
 2. **Correctness by construction.** Every scenario's gold answer must be *entailed* by its
-   stated constraints plus arithmetic — never by taste. Each scenario carries a
+   stated constraints plus arithmetic, never by taste. Each scenario carries a
    `gold_rationale` with the worked math proving the gold answer uniquely satisfies the
    constraints and that each trap violates a specific, named one.
 3. **Constrained answer space.** All choices come from global version-pinned catalogs, so
    claims are falsifiable against documented properties. The catalogs are identical for
-   every scenario — a 100-option multiple choice leaks no per-scenario hints. Correct
+   every scenario, so a 100-option multiple choice leaks no per-scenario hints. Correct
    answers are pinned by constraint math, never by menu elimination: the wrong options are
    temptingly wrong, not absurdly wrong.
 4. **Contamination resistance by twist, not obscurity.** Scenarios are de-labeled (described
    functionally, never by their famous name) and each carries a **constraint inversion**: one
    load-bearing constraint is perturbed so a specific piece of the canonical blog answer
-   becomes a scored trap. Reciting training data doesn't just fail to help — it actively
+   becomes a scored trap. Reciting training data doesn't just fail to help; it actively
    fails items. Every scenario must declare which canonical answer its twist invalidates.
 5. **Anti-gaming symmetry.** Precision scoring punishes pattern-spraying. Fully-specified
    scenarios punish reflexive clarifying; feasible-but-scary scenarios punish crying
@@ -94,7 +94,7 @@ semantics, recovery, observability, scheduling, cryptographic membership,
 ML correctness, and probabilistic latency. Held-out YAML is intentionally
 gitignored and must be backed up in a private store.
 
-## Baseline results (v0.3 — 38 public scenarios, reasoning effort HIGH)
+## Baseline results (v0.3: 38 public scenarios, reasoning effort HIGH)
 
 | Model | Overall | Solution | clarify | infeas. | migration | operability | parsimony | coverage | tradeoffs | Mode | Format | Cost | Wall time |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -108,8 +108,8 @@ Protocol: pass@1, single run, July 2026, reasoning effort high everywhere
 (Anthropic adaptive thinking / OpenAI-style reasoning_effort; temperature at
 provider default for reasoning modes). **Solution** = pass rate over the
 mode-defining answer checks only (decision slots, conflict sets, missing-info
-sets) — "did the model actually solve it." **Overall** macro-averages all
-dimensions — "would you want it designing systems you operate."
+sets), answering "did the model actually solve it." **Overall** macro-averages all
+dimensions, answering "would you want it designing systems you operate."
 ¹ xAI console figure; recorded value predated the reasoning-token accounting
 fix. ² gpt-5.6-sol includes a $0.95 redundant top-up: the original run was misdiagnosed as dead while merely slow; graded records verified duplicate-free.
 
@@ -124,7 +124,7 @@ Headline findings:
   always ask when load-bearing facts are missing; opus and GLM design anyway
   at every thinking budget tested (three consecutive pilots); gpt splits.
 - **Haystack pair delta was zero-to-positive**: no model lost solution content
-  when requirements were buried in ~1,200 words of documents with decoys —
+  when requirements were buried in ~1,200 words of documents with decoys;
   longer documents are needed to stress extraction (v0.4).
 
 Calibration status: 327 items graded; 44 discriminate, 13 fail for all five
@@ -135,11 +135,11 @@ retained in git history.
 ## Roadmap: calibrating to 50%
 
 The benchmark's difficulty target is that **the strongest available model scores
-~50% Overall**. v0.3 sits at 92%, so v0.4's agenda is difficulty — earned
+~50% Overall**. v0.3 sits at 92%, so v0.4's agenda is difficulty, earned
 through harder entailment, never through stricter grading of defensible answers:
 
 - Scale the formal-proof scenario style (fencing races, quorum-safety
-  migrations, capability DAGs — the items where frontier models actually drop
+  migrations, capability DAGs: the items where frontier models actually drop
   multiple solution checks), with answers pinned by chained computations.
 - New problem classes: minimal-retraction split-brain reconciliation (computable
   optimum), self-referential recovery (verifier inside the compromise boundary;
@@ -150,7 +150,7 @@ through harder entailment, never through stricter grading of defensible answers:
   no model anything).
 - Two-phase iterability: post-design change requests, scored behaviorally.
 - Rigor: multi-run variance, held-out-split leaderboard runs, independent proof
-  review of gold rationales, and discrimination-driven refresh — items every
+  review of gold rationales, and discrimination-driven refresh, where items every
   frontier model passes retire to a floor set.
 
 ## What we consciously don't measure
@@ -169,13 +169,13 @@ scenario PR must include:
 1. Numbered `constraints` and `requirements` (some implicit but derivable), `flows` with
    decision slots, and complete `gold` sets (required/forbidden patterns, slot answers,
    coverage map, parsimony cap).
-2. `traps` — each tagged with the specific constraint it violates and why it's attractive.
+2. `traps`, each tagged with the specific constraint it violates and why it's attractive.
 3. A `twist` naming the canonical answer it invalidates, with at least one gold item that
    canonical recitation fails (enforced by lint).
 4. A `gold_rationale` with the worked math. This is the review artifact: a second reviewer
    checks the math, not vibes.
 5. A clean `sdbench validate` pass, and (for inclusion in a released split) evidence the
-   items discriminate — piloted against ≥3 models with non-uniform pass rates.
+   items discriminate: piloted against ≥3 models with non-uniform pass rates.
 
 What gets rejected: scenarios whose answer requires taste rather than entailment; twists
 that are flavor rather than inversion; giveaways where the menu eliminates itself; items
