@@ -132,6 +132,27 @@ models and are under review per the all-fail-indicts-the-item rule (11 are
 parsimony caps, 2 are coverage acceptable-sets). v0.1/v0.2 pilot tables are
 retained in git history.
 
+## Roadmap: calibrating to 50%
+
+The benchmark's difficulty target is that **the strongest available model scores
+~50% Overall**. v0.3 sits at 92%, so v0.4's agenda is difficulty — earned
+through harder entailment, never through stricter grading of defensible answers:
+
+- Scale the formal-proof scenario style (fencing races, quorum-safety
+  migrations, capability DAGs — the items where frontier models actually drop
+  multiple solution checks), with answers pinned by chained computations.
+- New problem classes: minimal-retraction split-brain reconciliation (computable
+  optimum), self-referential recovery (verifier inside the compromise boundary;
+  partial infeasibility is the answer), adversary-raced recovery schedules.
+- Ordered-proof answers: multi-step transition sequences with per-step
+  invariants as a first-class gradable output.
+- Haystacks at realistic length (8-10K words; v0.3's ~1,200-word documents cost
+  no model anything).
+- Two-phase iterability: post-design change requests, scored behaviorally.
+- Rigor: multi-run variance, held-out-split leaderboard runs, independent proof
+  review of gold rationales, and discrimination-driven refresh — items every
+  frontier model passes retire to a floor set.
+
 ## What we consciously don't measure
 
 - **Prose quality.** The ungraded `notes` field exists for human inspection, but reasoning
