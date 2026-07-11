@@ -195,6 +195,14 @@ def _openai_complete(
         text = response.choices[0].message.content or ""
         prompt_tokens = response.usage.prompt_tokens if response.usage else 0
         completion_tokens = response.usage.completion_tokens if response.usage else 0
+        # Some OpenAI-compatible providers (verified: xAI) report reasoning
+        # tokens SEPARATELY from completion_tokens even though they bill as
+        # output; official OpenAI includes them in completion_tokens. Fold
+        # them in on compat endpoints so cost accounting is honest.
+        if not official and response.usage is not None:
+            details = getattr(response.usage, "completion_tokens_details", None)
+            reasoning_tokens = getattr(details, "reasoning_tokens", None) or 0
+            completion_tokens += reasoning_tokens
         usage = Usage(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
