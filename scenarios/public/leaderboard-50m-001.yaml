@@ -1,0 +1,183 @@
+# The leaderboard scenario where the canonical answer (Redis sorted sets) is
+# necessary but NOT sufficient: prize money makes scores durable business
+# records, so Redis must be a derived serving layer over a durable system of
+# record — and consistency splits between "your own rank" and the global board.
+instance_id: leaderboard-50m-001
+domain: gaming-platform
+difficulty: medium
+version: "0.2.0"
+split: public
+
+problem_statement: |
+  A mobile game runs weekly ranked tournaments with CASH prizes for top
+  finishers. Facts:
+
+  - 50,000,000 participating players per tournament; score submissions
+    peak at 100,000/second in the final hour.
+  - Views: (a) global top-100, refreshed within 10 seconds is fine;
+    (b) the player's own rank and score — after submitting a score, the
+    player MUST immediately see a rank/score view that reflects their own
+    submission; (c) the 50 ranks around the player, same freshness as (a).
+  - Prizes are money: an acknowledged score submission can never be lost,
+    and final standings must be reconstructible for dispute resolution
+    (players contest prize outcomes every week).
+  - Rank display may be approximate during the tournament (percentile-
+    bucket precision) but final standings are exact.
+
+  Design score ingestion, storage, and the three read paths.
+
+context: |
+  Submissions are authoritative server events (anti-cheat validated
+  upstream). Dispute resolution requires showing a player's full
+  submission history for the tournament.
+
+constraints:
+  - id: C1
+    type: durability
+    value: "acknowledged submissions never lost; final standings exact and reconstructible for weekly prize disputes"
+  - id: C2
+    type: consistency
+    value: "a player's own rank/score view reflects their own submission immediately (read-your-writes for self); global/neighbor views tolerate ~10s staleness"
+  - id: C3
+    type: throughput
+    value: "100,000 submissions/second peak; 50M players per tournament"
+  - id: C4
+    type: latency
+    value: "rank views are interactive (<100ms); during-tournament rank may be approximate, finals exact"
+
+requirements:
+  - id: R1
+    text: Ingest 100k submissions/second without losing acknowledged scores.
+  - id: R2
+    text: A player immediately sees their own submitted score reflected.
+  - id: R3
+    text: Top-100 and neighbor views serve interactively at ~10s freshness.
+  - id: R4
+    text: Final standings are exact and auditable for disputes.
+
+flows:
+  - id: own_view
+    description: Consistency of the player's own rank/score view after submitting.
+    decision_slots:
+      consistency: [read-your-writes-for-own-submission, eventual-same-as-global]
+  - id: global_view
+    description: Consistency of top-100 and neighbor views during the tournament.
+    decision_slots:
+      consistency: [eventual-bounded-staleness, strongly-consistent-with-writes]
+  - id: score_storage
+    description: Where the authoritative scores live.
+    decision_slots:
+      residency: [durable-store-of-record-with-derived-rankings, in-memory-ranking-structure-as-primary]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: own_view
+    slot: consistency
+    acceptable: [read-your-writes-for-own-submission]
+  - id: g2
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: global_view
+    slot: consistency
+    acceptable: [eventual-bounded-staleness]
+  - id: g3
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: score_storage
+    slot: residency
+    acceptable: [durable-store-of-record-with-derived-rankings]
+  - id: g4
+    dimension: tradeoff_selection
+    check: role_required
+    acceptable_roles: [system-of-record]
+    acceptable_components: [postgresql-16, mysql-8, cassandra-4]
+  - id: g5
+    dimension: tradeoff_selection
+    check: role_forbidden
+    role: system-of-record
+    forbidden_components: [redis-7, memcached]
+  - id: g6
+    dimension: tradeoff_selection
+    check: role_required
+    acceptable_roles: [serving-cache]
+    acceptable_components: [redis-7, memcached]
+  - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
+    acceptable: [append-only-log, temporal-audit-log, event-sourcing]
+  - id: g8
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [materialized-views, denormalization, cache-aside]
+  - id: g9
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 8
+
+traps:
+  - id: T1
+    description: Redis sorted sets as THE leaderboard store — submissions ZADD directly, ranks read with ZRANK.
+    violated_constraint_id: C1
+    why_attractive: >
+      It is the single most-recited answer in system design ("leaderboard =
+      Redis sorted set") and it genuinely nails the read patterns. But prizes
+      make scores money-grade records: async-replicated in-memory storage as
+      primary means a node loss can vaporize acknowledged submissions, and
+      weekly disputes need submission history that ZADD overwrites.
+  - id: T2
+    description: Make the global board strongly consistent with submissions "so nobody sees a wrong rank".
+    violated_constraint_id: C3
+    why_attractive: Rank correctness sounds like the product. But coupling 100k writes/second to globally consistent top-100 reads buys precision the requirements EXPLICITLY waive (10s staleness, approximate mid-tournament ranks) at maximal cost — and player-visible rank churns constantly at this write rate anyway.
+  - id: T3
+    description: Serve the player's own view from the same eventually-updated ranking pipeline as everyone else's.
+    violated_constraint_id: C2
+    why_attractive: One read path is simpler than two, and 10 seconds of lag "barely matters". But C2 makes own-submission visibility a hard requirement — the cheap trick is reading your own row from the store of record (or echoing the write) while RANK stays approximate; models that unify the paths fail the stated split.
+
+twist:
+  description: >
+    The most-recited answer in system design (Redis sorted sets) is planted
+    as necessary-but-insufficient: cash prizes turn scores into durable
+    business records, and consistency splits between self-view and
+    global-view rather than being one choice.
+  invalidated_canonical: >
+    "Leaderboard = Redis sorted set" fails g3/g5/T1 when scores carry prize
+    money: the sorted set is the right SERVING structure but the wrong
+    SYSTEM OF RECORD. The entailed design: durable submission log +
+    store of record, sorted sets/buckets as derived serving layer (g6),
+    read-your-writes for the submitting player's own row (g1), eventual
+    bounded staleness for everyone else's view of them (g2).
+  twist_gold_refs: [g3, g5]
+
+gold_rationale: |
+  Storage split (g3-g6, T1): C1 makes acknowledged submissions durable
+  business records with dispute-grade history — properties of a durable
+  store of record (relational, or wide-column for the 100k/s write rate;
+  both in g4's acceptable set with different sharding stories), not of an
+  in-memory structure with async persistence. The serving problem (ZRANK-
+  style interactive reads, C4) remains real, which is why the sorted-set
+  layer survives as a DERIVED view (g6): rebuildable from the record,
+  lossable without losing money. The canon's error is collapsing the two
+  layers into one.
+
+  Consistency split (g1, g2, T2, T3): C2 states two different freshness
+  contracts. Own-view read-your-writes is cheap at any scale — read your
+  own submission from the store of record (or echo the acknowledged write
+  back), with rank shown from the approximate pipeline. Global strong
+  consistency at 100k writes/second is precision the requirements waive
+  (10s + approximate ranks are stated), so paying for it is the
+  over-engineering direction; bounded-staleness derived views (g8:
+  materialized top-100, percentile buckets for neighbor/own rank) satisfy
+  R3 interactively.
+
+  Auditability (g7, R4): weekly disputes require the submission HISTORY,
+  entailing an append-only submission log (or temporal/event-sourced
+  record) beneath the current-best-score row — final exact standings are
+  computed from the record, not from the serving layer.

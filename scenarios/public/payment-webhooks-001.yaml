@@ -1,0 +1,169 @@
+# Payment webhook ingestion where the "webhooks are just HTTP endpoints" canon
+# fails on three stated provider behaviors: at-least-once delivery, no ordering
+# guarantee, and 72-hour redelivery storms after provider incidents.
+instance_id: payment-webhooks-001
+domain: payments-integration
+difficulty: medium
+version: "0.2.0"
+split: public
+
+problem_statement: |
+  A subscription business processes payment events from its payment service
+  provider (PSP) via webhooks. The PSP's documented delivery contract:
+
+  - Delivery is AT-LEAST-ONCE: the same event may arrive multiple times.
+  - Ordering is NOT guaranteed: a refund.settled may arrive before the
+    charge.succeeded it refunds; a subscription.canceled may precede the
+    final invoice.paid.
+  - The endpoint must respond 2xx within 5 seconds or the delivery counts
+    as failed and will be retried with backoff FOR UP TO 72 HOURS.
+  - After PSP-side incidents, queued deliveries flush at up to 50x normal
+    rate (documented and observed: last incident delivered 3 days of
+    events in 40 minutes).
+
+  Business rules: every event must produce its business effect exactly once
+  (no double credits, no double provisioning); an event that cannot be
+  processed must never be silently dropped; normal volume is ~200
+  events/second.
+
+  Design the webhook ingestion and processing pipeline.
+
+context: |
+  Business effects include: extend subscription, revoke access, issue
+  credit, trigger dunning. Some effects depend on entity state (a refund
+  applies to a charge). The PSP includes a unique event id and the entity
+  id in every delivery.
+
+constraints:
+  - id: C1
+    type: durability
+    value: "each event's business effect applied exactly once; unprocessable events are never silently dropped"
+  - id: C2
+    type: network
+    value: "at-least-once delivery with duplicates; NO ordering guarantee across events for the same entity"
+  - id: C3
+    type: latency
+    value: "endpoint must 2xx within 5 seconds or delivery is retried for up to 72 hours"
+  - id: C4
+    type: scale
+    value: "~200 events/second normal; post-incident redelivery storms up to 50x (10,000/second) for tens of minutes"
+
+requirements:
+  - id: R1
+    text: Duplicate deliveries never produce duplicate business effects.
+  - id: R2
+    text: Out-of-order arrivals converge to the correct final state per entity.
+  - id: R3
+    text: The endpoint stays inside the 5-second acknowledgment window even during 50x storms.
+  - id: R4
+    text: Failed/unprocessable events are retained and visible for resolution.
+
+flows:
+  - id: ack_strategy
+    description: What happens between receiving a delivery and returning 2xx.
+    decision_slots:
+      strategy: [persist-then-ack-process-async, process-business-effect-inline-then-ack]
+  - id: ordering
+    description: Handling the PSP's lack of ordering guarantees.
+    decision_slots:
+      approach: [entity-state-machine-tolerates-any-order, assume-provider-order, buffer-and-sort-by-timestamp]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: operability
+    check: slot_match
+    flow: ack_strategy
+    slot: strategy
+    acceptable: [persist-then-ack-process-async]
+  - id: g2
+    dimension: operability
+    check: pattern_required
+    acceptable: [queue-load-leveling]
+  - id: g3
+    dimension: operability
+    check: pattern_required
+    acceptable: [idempotency-keys, at-least-once-with-dedup]
+  - id: g4
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: ordering
+    slot: approach
+    acceptable: [entity-state-machine-tolerates-any-order]
+  - id: g5
+    dimension: operability
+    check: pattern_required
+    acceptable: [dead-letter-queue]
+  - id: g6
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [idempotency-keys, at-least-once-with-dedup]
+  - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
+    acceptable: [dead-letter-queue]
+  - id: g8
+    dimension: tradeoff_selection
+    check: role_required
+    acceptable_roles: [message-queue]
+    acceptable_components: [kafka, rabbitmq, sqs]
+  - id: g9
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 8
+
+traps:
+  - id: T1
+    description: Process the business effect inline in the webhook handler, then return 2xx.
+    violated_constraint_id: C3
+    why_attractive: It is the simplest correct-looking flow and works fine at 200/s in testing. But during a 50x storm, inline processing (state reads, effect writes, third-party calls) blows the 5-second window, deliveries "fail", the PSP retries them into the same overloaded endpoint, and the retry storm feeds itself for up to 72 hours.
+  - id: T2
+    description: Rely on the PSP's event timestamps — buffer briefly and sort, or just assume near-order.
+    violated_constraint_id: C2
+    why_attractive: Events carry timestamps and MOSTLY arrive in order, so sorting a small buffer feels like it restores the guarantee. But the contract says no ordering, and post-incident flushes interleave 3 days of events in 40 minutes — no bounded buffer re-orders that. Correctness must come from the entity state machine accepting any arrival order.
+  - id: T3
+    description: Drop events that reference unknown entities or arrive in impossible states ("log and move on").
+    violated_constraint_id: C1
+    why_attractive: An out-of-order refund for a charge you have not seen yet LOOKS like garbage, and dropping it keeps the pipeline clean. But it is usually the charge arriving late — parking the event (DLQ/retry-later) converges; dropping it silently loses money-affecting state forever.
+
+twist:
+  description: >
+    A webhook integration whose three failure modes are all DOCUMENTED
+    provider behavior — duplicates, disorder, and 72-hour retry storms —
+    so "just an HTTP endpoint that updates the database" fails on the
+    provider's own contract.
+  invalidated_canonical: >
+    The tutorial webhook pattern (verify signature, apply effect, return
+    200) fails g1/g4: it couples acknowledgment to processing (self-feeding
+    retry storms under C3+C4) and encodes the provider's ordering as an
+    assumption C2 explicitly denies. The entailed shape: durable intake +
+    fast ack, dedup on event id, per-entity state machines that accept any
+    order, and a dead-letter path so nothing money-shaped is dropped.
+  twist_gold_refs: [g1, g4]
+
+gold_rationale: |
+  Ack decoupling (g1, g2, g8, T1, R3): the 5-second window (C3) must hold
+  at 10,000/s (C4). The only operation that always fits is: verify, persist
+  the raw event durably to an intake queue, return 2xx. Processing drains
+  the queue at its own sustainable rate (queue-load-leveling). Inline
+  processing makes ack latency a function of downstream health, which is
+  exactly what fails during storms — and failed acks CREATE more deliveries
+  (72h retries), the self-feeding loop.
+
+  Exactly-once effects (g3, g6, R1): delivery is at-least-once and the
+  intake queue adds its own redelivery, so effect application must be
+  idempotent: the PSP event id is the idempotency key; processed-id checks
+  (or transactional effect+id in one commit) make duplicates no-ops.
+
+  Disorder (g4, T2, R2): C2 is contractual, and the incident flush
+  interleaves days of events — re-sorting is unbounded buffering. The
+  entailed mechanism is a per-entity state machine where every event type
+  is applicable from any state: a refund.settled arriving before its
+  charge parks as pending-application (not dropped, T3/g5/g7) and applies
+  when the charge lands; terminal states absorb late events. Correct final
+  state is a property of the machine, not of arrival order.

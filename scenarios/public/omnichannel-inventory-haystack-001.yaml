@@ -1,0 +1,347 @@
+# Long-form sibling of omnichannel-inventory-001: IDENTICAL gold sets, but the
+# binding facts are buried inside ~2,800 words of realistic program
+# documentation (policy manual, marketplace agreement, IT assessment, marketing
+# memo, incident review) alongside decoys. The structured constraints are
+# deliberately pointers into the document. The score delta between this pair
+# isolates requirements-extraction-under-load from design skill.
+instance_id: omnichannel-inventory-haystack-001
+domain: retail-commerce
+difficulty: hard
+version: "0.2.0"
+split: public
+
+problem_statement: |
+  You are the architect for Meridian Apparel Group's Unified Inventory
+  Program (UIP). Design the inventory system: how each sales channel
+  allocates stock, what happens during store connectivity loss, and how
+  conflicts are resolved.
+
+  The binding requirements are distributed across the program documentation
+  reproduced in the context below — policy manual excerpts, the marketplace
+  agreement, the IT infrastructure assessment, and related memos. Extract
+  what is binding; not everything in the documentation affects the design.
+
+context: |
+  ================================================================
+  DOCUMENT 1 — UNIFIED INVENTORY PROGRAM: PHASE 2 BRIEF (excerpts)
+  ================================================================
+
+  Meridian Apparel Group operates 300 retail locations and a direct
+  e-commerce channel. Phase 1 of UIP consolidated purchasing and
+  distribution-center (DC) operations onto the shared merchandise pool.
+  Phase 2 unifies live inventory across channels: store shelf stock, DC
+  stock, and in-transit stock become one sellable pool of approximately
+  2 million active SKUs.
+
+  Phase 2 introduces Ship-From-Store (SFS): e-commerce orders may be
+  fulfilled from any store's shelf stock, not only from the DC. Pilot data
+  from 12 stores shows SFS reduces split shipments 31% and improves
+  same-state delivery times by 1.4 days. Under SFS, a store's physical
+  shelf units are simultaneously sellable to a walk-in customer and to any
+  online customer nationwide. Chain-wide sales volume across both channels
+  peaks at approximately 40 transactions per second (holiday peak,
+  measured 2025).
+
+  Program success metrics: inventory accuracy at 99.5% or better by cycle
+  count; online order cancellation rate within contractual bounds (see
+  Marketplace Agreement, Document 3); zero increase in store transaction
+  time; reconciliation labor reduced 80% versus the Phase 1 manual
+  process, which the CFO has described as "three regional teams doing
+  archaeology in spreadsheets every Monday."
+
+  ================================================================
+  DOCUMENT 2 — STORE OPERATIONS POLICY MANUAL, REV 11 (excerpts)
+  ================================================================
+
+  §4.1 Store hours are set regionally. Registers open 15 minutes before
+  posted hours. §4.2 Cash management follows the dual-count procedure at
+  open and close; discrepancies over $50 are reported same-day. §4.3
+  Returns without receipt are limited to store credit at the lowest
+  30-day selling price, manager approval required over $150.
+
+  §4.4 Price overrides beyond 20% require district approval through the
+  POS approval queue. Where the approval queue is unreachable, overrides
+  are limited to 20% and logged for next-day review. §4.5 Loss-prevention
+  event tags on high-value SKUs are deactivated only at tender. §4.6
+  Associates may not hold merchandise for customers beyond close of
+  business without a paid deposit.
+
+  §4.7 Continuity of tender. It is the position of Meridian Apparel Group
+  that a customer standing at a register with merchandise and payment is
+  served, without exception. Registers shall complete sales — all tender
+  types the store supports — during any loss of wide-area connectivity,
+  telecommunications failure, or central-system unavailability, however
+  long it persists. No corporate system dependency shall be introduced
+  that prevents a store from selling what is on its shelves. This section
+  supersedes any conflicting integration requirement in any other program
+  document.
+
+  §4.8 Records of sales completed during connectivity loss are retained
+  at the store with the same durability obligations as connected sales
+  and are transmitted for central reconciliation upon restoration of
+  service. Systematic reconciliation applies; see also the Fall Incident
+  Review (Document 6). §4.9 Associates clock in via the workforce app;
+  paper timecards are accepted at locations designated by HR.
+
+  ================================================================
+  DOCUMENT 3 — ONLINE MARKETPLACE & FULFILLMENT AGREEMENT (excerpts)
+  ================================================================
+
+  §7 Service levels. Order acknowledgment within 2 minutes of payment
+  authorization. Shipment within the SLA matrix by service tier (Exhibit
+  D). Customer-service response within one business day.
+
+  §8 Payments. Settlement occurs T+2 via the acquiring bank. Chargebacks
+  are passed through at cost plus the network fee. The fraud-screening
+  vendor (Document 6 references the 2024 selection) scores transactions
+  pre-authorization; orders scoring above 850 are held for manual review
+  for up to 4 hours.
+
+  §9 Inventory accuracy; remedies. Merchant warrants that sellable
+  quantities presented to the Marketplace reflect inventory available for
+  fulfillment. An order canceled for inventory unavailability
+  ("oversell cancellation") triggers: (a) full refund; (b) a $12 goodwill
+  credit funded by Merchant; (c) inclusion in the monthly Oversell Rate
+  calculation. 9.1 Should the Oversell Rate exceed one half of one
+  percent (0.5%) of completed orders in any calendar month, Merchant
+  incurs the Schedule-C penalty tier and, upon a third consecutive month,
+  Marketplace may suspend the Merchant storefront. 9.2 Quantities
+  presented MAY be reduced by Merchant at any time without penalty;
+  presenting quantities the Merchant cannot verify as available at
+  fulfillment time is the sole basis of oversell liability.
+
+  §10 Returns follow the harmonized policy in Exhibit F.
+
+  ================================================================
+  DOCUMENT 4 — IT INFRASTRUCTURE ASSESSMENT, UIP PHASE 2 (excerpts)
+  ================================================================
+
+  Store connectivity: all 300 locations operate on dual-carrier SD-WAN.
+  Measured availability by location averages 99.0% (fleet median 99.2%,
+  worst decile 97.8%). In practical terms the average store experiences
+  roughly seven hours of full WAN unavailability per month, typically in
+  episodes of 10-50 minutes, with tail events exceeding 8 hours during
+  regional carrier incidents (two such events in the trailing 12 months).
+
+  In-store systems: POS terminals run the current-generation register
+  platform with local compute and storage at every location; the store
+  server closet hosts the returns kiosk and the local network head-end.
+
+  Legacy note: the nightly inventory export to the AS/400-based
+  merchandising system (COBOL batch, fixed-width format, 02:00 window) is
+  scheduled for retirement in Phase 3 when merchandising cutover
+  completes. Phase 2 systems MUST NOT take a dependency on the nightly
+  export or its file format; it exists only for legacy merchandising
+  reports during the transition and its schedule is frozen — integration
+  teams should treat it as read-only exhaust, not an interface.
+
+  Capacity: chain-wide transaction peak 40/s (Document 1); DC WMS API
+  sustains 500 requests/second; the e-commerce platform autoscales within
+  its own budget envelope and is out of scope for this assessment.
+
+  ================================================================
+  DOCUMENT 5 — MARKETING MEMO: HOLIDAY LAUNCH CALENDAR (excerpts)
+  ================================================================
+
+  BOPIS (buy-online-pickup-in-store) relaunches November 4 with the
+  "Ready in 90" campaign — 90-minute pickup promise, marketed in the top
+  40 DMAs. Promo engine ships SKU-level markdown waves each Thursday
+  10:00 ET through December. The gift-card double-points event runs
+  Black Friday through Cyber Monday. Creative refresh for SFS-eligible
+  PDPs ("Ships today from your local store") gated on Phase 2 go-live.
+  Note: campaign dates are marketing commitments, not engineering
+  deadlines; engineering go/no-go is governed by the program steering
+  committee (Document 1 owners).
+
+  ================================================================
+  DOCUMENT 6 — FALL INCIDENT REVIEW (excerpts)
+  ================================================================
+
+  During the November 24 regional carrier incident (6h11m, 38 stores),
+  stores continued operating per policy §4.7. Upon service restoration,
+  central inventory showed 1,204 units sold in-store that e-commerce had
+  concurrently sold or promised, including 61 SFS orders allocated
+  against shelf stock of disconnected stores. Resolution took 11 days of
+  manual work across three teams, produced 214 customer-visible
+  cancellations processed under Agreement §9 (all within the monthly
+  rate), and one Schedule-C near-miss. Review board directive: Phase 2
+  shall resolve cross-channel conflicts systematically upon store
+  reconnection, with customer-facing outcomes (backorder, substitution,
+  refund per policy) applied automatically and an auditable trail;
+  Monday-spreadsheet archaeology is explicitly retired. The board also
+  noted the 2024 fraud-vendor selection is unaffected by Phase 2 and
+  requires no integration changes.
+
+constraints:
+  - id: C1
+    type: availability
+    value: "register behavior during connectivity loss is governed by Store Operations Policy §4.7 and the measured WAN figures in the IT assessment (Documents 2 and 4)"
+  - id: C2
+    type: consistency
+    value: "online inventory accuracy obligations and oversell remedies per Marketplace Agreement §9 (Document 3)"
+  - id: C3
+    type: durability
+    value: "offline-sale retention and systematic reconciliation obligations per Policy §4.8 and the incident review directive (Documents 2 and 6)"
+  - id: C4
+    type: scale
+    value: "scale, connectivity, and capacity figures per the program brief and IT assessment (Documents 1 and 4)"
+
+requirements:
+  - id: R1
+    text: Stores comply with Policy §4.7/§4.8 during and after connectivity loss.
+  - id: R2
+    text: Online selling complies with Marketplace Agreement §9.
+  - id: R3
+    text: Cross-channel conflicts resolve per the incident review board directive.
+  - id: R4
+    text: SFS exposure of store stock to online buyers remains §9-compliant during store connectivity loss.
+    implicit: true
+
+flows:
+  - id: store_pos
+    description: Store register behavior during a WAN outage.
+    decision_slots:
+      outage_policy: [continue-selling-from-local-state, reject-sales-until-reconnect]
+  - id: online_allocation
+    description: How online checkout claims a unit.
+    decision_slots:
+      consistency: [strong-transactional-reserve, eventual-optimistic-allocate]
+  - id: conflict_resolution
+    description: Resolving units sold twice across channels during an outage.
+    decision_slots:
+      mechanism: [compensation-workflow-with-defined-outcomes, last-write-wins-overwrite, manual-review-queue-only]
+  - id: sfs_during_outage
+    description: Ship-from-store availability of an OFFLINE store's stock to online buyers.
+    decision_slots:
+      policy: [withhold-offline-store-stock-from-online, keep-selling-offline-store-stock-online]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: store_pos
+    slot: outage_policy
+    acceptable: [continue-selling-from-local-state]
+  - id: g2
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: online_allocation
+    slot: consistency
+    acceptable: [strong-transactional-reserve]
+  - id: g3
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: conflict_resolution
+    slot: mechanism
+    acceptable: [compensation-workflow-with-defined-outcomes]
+  - id: g4
+    dimension: tradeoff_selection
+    check: pattern_required
+    acceptable: [saga]
+  - id: g5
+    dimension: operability
+    check: pattern_required
+    acceptable: [offline-first-sync]
+  - id: g6
+    dimension: operability
+    check: pattern_required
+    acceptable: [reconciliation-on-reconnect]
+  - id: g7
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: sfs_during_outage
+    slot: policy
+    acceptable: [withhold-offline-store-stock-from-online]
+  - id: g8
+    dimension: tradeoff_selection
+    check: pattern_forbidden
+    forbidden: [two-phase-commit, last-write-wins]
+  - id: g9
+    dimension: tradeoff_selection
+    check: role_required
+    acceptable_roles: [system-of-record]
+    acceptable_components: [postgresql-16, mysql-8]
+  - id: g10
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [saga, reconciliation-on-reconnect]
+  - id: g11
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [offline-first-sync]
+  - id: g12
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 9
+
+traps:
+  - id: T1
+    description: Registers coordinate with the central system per sale (2PC or synchronous reserve) for a single consistent pool.
+    violated_constraint_id: C1
+    why_attractive: Document 1's "one sellable pool" framing and §9's accuracy warranty both pull toward uniform strong consistency — unless the reader has absorbed §4.7, which flatly supersedes any such integration and is reinforced by the seven-hours-per-month WAN figure four documents away.
+  - id: T2
+    description: Optimistic/eventual online allocation with post-hoc cleanup.
+    violated_constraint_id: C2
+    why_attractive: The incident review shows cancellations being processed routinely, which reads like organizational tolerance — unless the reader connects §9.1's 0.5% monthly rate, the Schedule-C near-miss, and the storefront-suspension escalation, which price routine oversell as existential.
+  - id: T3
+    description: Treat the AS/400 nightly export or the BOPIS launch dates as design drivers (build around the batch window; architect for the "Ready in 90" deadline).
+    violated_constraint_id: C4
+    why_attractive: Both decoys are written in the urgent register of real constraints — a legacy COBOL batch with a frozen schedule and a marketed 90-minute promise with dates. But Document 4 explicitly forbids depending on the export ("read-only exhaust"), and Document 5 explicitly disclaims the dates as non-engineering commitments; designing around either is reacting to noise.
+
+twist:
+  description: >
+    The short-form sibling (omnichannel-inventory-001) states five binding
+    facts in five bullet points; this scenario buries the same facts across
+    ~2,800 words of realistic program documentation with two aggressive
+    decoys. Gold sets are IDENTICAL — the score delta between siblings
+    isolates requirements-extraction-under-load.
+  invalidated_canonical: >
+    Skimming for the familiar problem shape retrieves "unified inventory
+    pool, keep it consistent" from Document 1 and fails g1/T1 against
+    §4.7's buried supremacy clause; reading the incident review as
+    tolerance for cancellations fails g2/T2 against §9.1's buried rate cap;
+    and the urgency-toned decoys (frozen COBOL batch window, marketed
+    90-minute promise) bait designs around facts the documents themselves
+    disclaim as non-binding.
+  twist_gold_refs: [g1, g2, g7]
+
+gold_rationale: |
+  Identical entailment to omnichannel-inventory-001 — see that scenario's
+  rationale for the full math. This file's contribution is the burial map:
+
+  Needle 1 (drives g1, g5, g11; kills T1): Policy §4.7 "continuity of
+  tender" — mid-manual, after four paragraphs of cash-handling minutiae —
+  states registers sell through ANY connectivity loss and SUPERSEDES
+  conflicting integration requirements; Document 4 quantifies the
+  partition frequency (avg ~7h/store/month; 8h+ tail events). Together
+  they entail offline-first local allocation for POS.
+
+  Needle 2 (drives g2; kills T2): Agreement §9.1 prices oversell — 0.5%
+  monthly rate cap, penalty tier, storefront suspension on the third
+  consecutive breach; §9.2 makes UNVERIFIABLE presented quantity the sole
+  basis of liability. Entails strong transactional reserve online.
+
+  Needle 3 (drives g7/R4): §9.2's liability basis plus Document 6's 61
+  SFS orders allocated against disconnected stores' shelves — an offline
+  store's stock is unverifiable at fulfillment time by definition, so it
+  must be withheld from online presentation during the outage
+  (explicitly penalty-free per §9.2).
+
+  Directive (drives g3, g4, g6, g10): Document 6's board directive names
+  the required shape — systematic resolution on reconnection with
+  automatic customer-facing outcomes and an audit trail — i.e., a
+  compensation workflow (saga), not LWW (silently erases one sale;
+  retired "archaeology") and not a manual queue (11 days, three teams).
+
+  Decoys (T3): the AS/400 export carries every marker of a binding legacy
+  constraint but Document 4 forbids depending on it; the BOPIS calendar
+  carries dates and a marketed promise but Document 5 disclaims them as
+  non-engineering commitments; the fraud vendor is stated twice to need
+  no integration changes. Designing around any of these is noise-reaction
+  that the parsimony cap (g12) and forbidden-pattern checks price.
