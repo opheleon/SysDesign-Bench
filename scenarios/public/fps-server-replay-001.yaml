@@ -13,7 +13,10 @@ problem_statement: |
   first-person shooter (C++ client already exists). Matches host up to 64
   players on consumer internet connections (30–80 ms RTT, ~1% packet loss).
   The server simulates at a fixed 128 ticks per second and is authoritative
-  for all gameplay outcomes.
+  for all gameplay outcomes. Local input must produce visible feedback within
+  20 ms; the server later reconciles that prediction. Fair hit registration is
+  defined by validating a shot against the target state visible to the shooter,
+  with server rewind capped at 100 ms.
 
   The game will run in a professional league. The league's anti-cheat and
   adjudication body mandates that any completed match can be re-simulated
@@ -23,8 +26,27 @@ problem_statement: |
   acceptable evidence; archives must be compact enough to retain every ranked
   match for a full season.
 
-  Per-client downstream bandwidth must not exceed 512 kbps at 64 players.
-  Player accounts, match results, and replays are persisted between matches.
+  Each client must receive authoritative state at least 20 times/second, with
+  p99 transport latency for each usable state update <=50 ms. Per-client
+  downstream must not exceed 512 kbps at 64 players. Wire-size measurements at 20 Hz, including
+  protocol overhead, are fixed: the full world is 8.0 KB/update; interest
+  filtering alone is 4.0 KB; delta compression alone is 3.8 KB; applying both
+  is 2.4 KB (KB is decimal throughout). At the stated loss/RTT, TCP and
+  WebSocket prototypes have 110 ms p99 delivery latency from head-of-line
+  blocking, while UDP with selective application reliability measures 45 ms.
+
+  The in-process simulation prototype takes 6.1 ms p99 per tick. Even the
+  fastest tested external state store, using one batched read and one batched
+  write, adds 2.4 ms of serialization and round-trip time, producing an 8.5 ms
+  tick. The 128 Hz budget is 7.8 ms.
+
+  Ranked matches last at most 30 minutes. An input record is exactly 20 bytes
+  per player per tick before compression; measured season-wide compression is
+  6:1. A complete replay also stores the versioned rules/configuration, initial
+  state, deterministic RNG seed, and ordered per-tick inputs; those fixed fields
+  add less than 1 MB/match. The full-season replay storage budget is 3 PB for
+  50 million matches. Player accounts, match results, and replay archives must
+  persist between matches.
 
   Design the server's networking, simulation, replay, and persistence
   approach.
@@ -32,30 +54,32 @@ problem_statement: |
 context: |
   Scale: up to 20,000 concurrent matches at peak, each on its own server
   process. Ranked season: ~50 million matches to retain for adjudication.
-  A full 64-player world snapshot serializes to roughly 8 KB.
+  A full 64-player world snapshot is the 8,000-byte figure above; it already includes
+  all players and must not be multiplied by 64 again. Critical discrete events
+  over UDP are acknowledged/retransmitted; superseded world snapshots are not.
 
 constraints:
   - id: C1
     type: latency
-    value: "128 Hz fixed-tick authoritative simulation: 7.8 ms per-tick budget; responsive gameplay at 30-80 ms client RTT with ~1% loss"
+    value: "128Hz simulation gives 7.8ms/tick; in-process tick p99=6.1ms while the minimum tested external-store overhead adds 2.4ms (8.5ms total); local input feedback <=20ms; usable state-update transport latency p99 <=50ms"
   - id: C2
     type: compliance
     value: "league mandate: bit-exact re-simulation of any match from recorded data; video is not evidence"
   - id: C3
     type: throughput
-    value: "per-client downstream <= 512 kbps at 64 players"
+    value: "authoritative updates >=20Hz and <=512kbps/client; wire sizes are 8.0KB full, 4.0KB interest-only, 3.8KB delta-only, 2.4KB combined"
   - id: C4
     type: scale
-    value: "~50 million ranked matches retained per season for adjudication"
+    value: "50M ranked matches, <=30m each; 20B/player/tick inputs compress 6:1; <1MB fixed replay metadata; full-season replay cap 3PB"
   - id: C5
     type: compliance
     value: "server is authoritative for all gameplay outcomes (anti-cheat)"
 
 requirements:
   - id: R1
-    text: Real-time authoritative simulation of 64-player matches at 128 Hz.
+    text: Simulate 64-player matches at 128 Hz and provide <=20 ms local input feedback without surrendering server authority.
   - id: R2
-    text: Fair hit registration for players at differing latencies.
+    text: Validate hits against the shooter-visible state using server rewind capped at 100 ms.
   - id: R3
     text: Any completed match can be re-simulated bit-exactly for adjudication.
   - id: R4
@@ -63,6 +87,8 @@ requirements:
     implicit: true
   - id: R5
     text: Accounts, match results, and replay archives persist between matches.
+  - id: R6
+    text: Deliver authoritative state at >=20 Hz with p99 transport latency <=50 ms and <=512 kbps per client.
 
 flows:
   - id: state_transport
@@ -73,7 +99,7 @@ flows:
   - id: replay_record
     description: What gets recorded so the league can re-simulate matches.
     decision_slots:
-      mechanism: [input-log-on-deterministic-sim, full-snapshot-archive, video-capture]
+      mechanism: [versioned-initial-state-seed-and-input-log-on-deterministic-sim, full-snapshot-archive, video-capture]
   - id: live_state
     description: Where authoritative in-match world state lives during play.
     decision_slots:
@@ -101,7 +127,7 @@ gold:
     check: slot_match
     flow: replay_record
     slot: mechanism
-    acceptable: [input-log-on-deterministic-sim]
+    acceptable: [versioned-initial-state-seed-and-input-log-on-deterministic-sim]
   - id: g4
     dimension: tradeoff_selection
     check: slot_match
@@ -109,68 +135,58 @@ gold:
     slot: residency
     acceptable: [in-process-memory]
   - id: g5
-    dimension: tradeoff_selection
-    check: pattern_required
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
     acceptable: [client-prediction]
   - id: g6
-    dimension: tradeoff_selection
-    check: pattern_required
-    acceptable: [lag-compensation]
-  - id: g7
-    dimension: tradeoff_selection
-    check: pattern_required
-    acceptable: [input-log-replay]
-  - id: g8
-    dimension: tradeoff_selection
-    check: pattern_required
-    acceptable: [interest-management]
-  - id: g9
-    dimension: tradeoff_selection
-    check: pattern_required
-    acceptable: [delta-compression]
-  - id: g10
-    dimension: operability
-    check: role_forbidden
-    role: hot-path-state
-    forbidden_components: [redis-7, memcached, postgresql-16, mysql-8, cassandra-4, mongodb-7]
-  - id: g11
     dimension: requirements_coverage
     check: coverage
     requirement: R2
     acceptable: [lag-compensation]
-  - id: g12
+  - id: g7
     dimension: requirements_coverage
     check: coverage
     requirement: R3
     acceptable: [input-log-replay]
-  - id: g13
+  - id: g8
     dimension: requirements_coverage
     check: coverage
     requirement: R4
     acceptable: [server-authoritative-state]
-  - id: g14
-    dimension: tradeoff_selection
-    check: role_required
-    acceptable_roles: [system-of-record, cold-path-persistence]
-    acceptable_components: [postgresql-16, mysql-8, mongodb-7]
-  - id: g15
+  - id: g9
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R5
+    acceptable: [postgresql-16, mysql-8, mongodb-7, cassandra-4]
+  - id: g10
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R6
+    acceptable: [interest-management]
+  - id: g11
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R6
+    acceptable: [delta-compression]
+  - id: g12
     dimension: parsimony
     check: parsimony
-    max_patterns: 15
+    max_patterns: 8
 
 traps:
   - id: T1
     description: TCP or WebSocket transport for live game state.
     violated_constraint_id: C1
-    why_attractive: Reliable ordered delivery sounds strictly better and is what every web engineer reaches for — but at ~1% loss, TCP head-of-line blocking stalls the entire state stream behind one lost packet, destroying 128 Hz responsiveness.
+    why_attractive: Reliable ordered delivery sounds strictly better and is what every web engineer reaches for. The measured TCP/WebSocket p99 delivery latency is 110 ms under the stated loss, over twice the 50 ms bound; selective-reliability UDP measures 45 ms because superseded snapshots do not wait behind a lost packet.
   - id: T2
     description: Keep live match state in Redis "for speed and crash recovery".
     violated_constraint_id: C1
-    why_attractive: '"In-memory datastore" sounds like exactly what a 7.8 ms tick needs, and crash recovery sounds responsible. But even a 0.5 ms round trip per state access inside a 7.8 ms tick serving 64 players burns the budget many times over; authoritative state must live in process memory.'
+    why_attractive: '"In-memory datastore" sounds like exactly what a 7.8 ms tick needs, and one batched read/write sounds cheap. Measurement removes the ambiguity: 6.1 ms in-process plus the fastest external store''s 2.4 ms minimum is 8.5 ms, already beyond the 7.8 ms tick budget.'
   - id: T3
     description: Archive full snapshot streams (or video) as the replay record.
-    violated_constraint_id: C4
-    why_attractive: Recording what the server already sends is the path of least resistance and needs no determinism work. But it cannot prove bit-exactness (C2 wants re-simulation, not playback), and the storage math at 50M matches makes it absurd.
+    violated_constraint_id: C2
+    why_attractive: Recording what the server already sends is the path of least resistance and needs no determinism work. Playback cannot prove the rules re-compute the disputed outcome, and 128Hz full snapshots consume 92.16PB/season against 3PB; video fails the mandate regardless of size.
 
 twist:
   description: >
@@ -180,38 +196,42 @@ twist:
     The Quake/Source-lineage canon (server sim + snapshot interpolation +
     prediction + lag compensation, floats free-running) fully answers the
     gameplay requirements and is what every netcode article teaches — but it
-    cannot produce bit-exact replays. Reciting it fails g3/g7/g12: the mandate
+    cannot produce bit-exact replays. Reciting it fails g3 and g7: the mandate
     forces a deterministic simulation core (fixed tick, seeded RNG, controlled
-    floating point) with logged inputs as the archival record.
-  twist_gold_refs: [g3, g7, g12]
+    floating point) with versioned initial state and logged inputs as the archive.
+  twist_gold_refs: [g3, g7]
 
 gold_rationale: |
-  Bandwidth math (g8, g9, C3): full 8 KB snapshots at even 20 Hz are
-  8000 x 8 x 20 = 1.28 Mbps per client — 2.5x over the 512 kbps cap. Interest
-  management (a player perceives a small subset of 64 players) plus delta
-  compression against last-acked state brings per-client payload to roughly
-  1-2 KB at 20-30 Hz (~160-480 kbps), inside the cap. Both patterns are
-  entailed, not optional.
+  Transport and bandwidth (g1, g10, g11, T1): at the required 20 Hz, the
+  measured full snapshot costs 8,000 x 8 x 20 = 1.28 Mbps/client. Interest-only
+  costs 4,000 x 8 x 20 = 640 kbps and delta-only costs
+  3,800 x 8 x 20 = 608 kbps; both exceed 512 kbps. Combined, the measured
+  2,400 x 8 x 20 = 384 kbps fits. Thus neither optimization alone suffices.
+  TCP/WebSocket also fail independently: their measured 110 ms p99 delivery latency
+  exceeds 50 ms, while selective-reliability UDP measures 45 ms. UDP reliably
+  retransmits discrete events but lets newer snapshots supersede lost ones.
 
-  Tick budget (g4, g10, T2): 128 Hz = 7.8 ms per tick, in which the server
-  advances physics/gameplay for 64 players. Any external datastore round trip
-  (Redis ~0.3-1 ms per op over loopback/LAN) inside the tick, multiplied by
-  per-player accesses, consumes the entire budget doing I/O. Authoritative
-  state lives in process memory; durable stores are for between-match data
-  (g14).
+  Tick and responsiveness (g4, g5, T2): the 128 Hz budget is 1000/128 =
+  7.8125 ms. The simulation itself measures 6.1 ms p99 in process. Even a single
+  batched external read/write adds 2.4 ms, totaling 8.5 ms, so external
+  authoritative residency cannot meet C1. With 30-80 ms RTT, a server response
+  also cannot provide <=20 ms local feedback; client prediction does, followed
+  by reconciliation against the authoritative in-process server.
 
-  Replay math (g3, g7, T3, C4): inputs are ~10-30 bytes/player/tick;
-  64 x 128 x 20 B ~= 164 KB/s raw, and inputs compress heavily (<50 MB per
-  30-min match, low single-digit PB-scale for 50M matches only if uncompressed
-  worst case; realistically tens of TB). Snapshot archives at 8 KB x 128 Hz x
-  64 players are ~1 MB/s+ per match — an order of magnitude worse — and replay
-  of snapshots is playback, not re-simulation: it cannot prove the disputed
-  outcome was computed by the rules (C2). Bit-exact re-simulation requires a
-  deterministic core: fixed timestep, seeded RNG, no wall-clock reads,
-  controlled float determinism — then the input log IS the match.
+  Replay math (g3, g7, T3): raw inputs per maximum-length match are
+  64 players x 128 ticks/s x 20 B x 1,800 s = 294,912,000 B. Measured 6:1
+  compression gives 49,152,000 B, and fixed replay metadata is <1 MB, so
+  50M matches require <2.51 PB and fit the 3 PB cap. Full snapshots are
+  8,000 B x 128 x 1,800 = 1,843,200,000 B/match, or 92.16 PB/season;
+  the 8 KB snapshot already contains all 64 players. More importantly, snapshot
+  playback and video do not re-simulate outcomes. A complete deterministic
+  archive records rules/build version, initial state, RNG seed, and ordered
+  per-tick inputs; fixed timestep, controlled floating point, and no wall-clock
+  reads then reproduce every state bit-exactly.
 
-  Transport (g1, T1): at 1% loss, TCP head-of-line blocking stalls all state
-  behind a retransmit (~RTT penalty, 30-80 ms = 4-10 ticks frozen). UDP with
-  application-level reliability only where needed (events, not superseded
-  state) is the entailed choice; prediction (g5) and lag compensation (g6/g11)
-  address the 30-80 ms RTT for responsiveness and fairness.
+  Authority, fairness, and persistence (g2, g6, g8, g9): clients submit inputs,
+  never outcomes, and select server-authoritative-state to cover R4. Lag
+  compensation is entailed by R2's explicit shooter-visible rewind definition,
+  capped at 100 ms. Between matches, any cataloged durable database in g9 may
+  hold account/result metadata and replay indexes/archive partitions; the gold
+  no longer assumes that only relational/document stores can fill that role.

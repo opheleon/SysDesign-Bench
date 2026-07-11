@@ -19,8 +19,9 @@ problem_statement: |
 
   1. SECTION CLOSURES, declared by the safety office (blasting, maintenance,
      collapse risk). Routing a vehicle through a closed section is a
-     potentially fatal safety incident. The safety office's word is law and
-     takes effect immediately.
+     potentially fatal safety incident. A declaration immediately blocks new
+     entry authorizations. A closure becomes active 90 seconds later, after
+     every previously issued authorization has necessarily expired.
   2. CONGESTION, derived from vehicle position reports. It affects ETAs and
      route choice but has no safety implication. Individual reports can be
      wrong (beacon glitches, sensor faults).
@@ -38,19 +39,34 @@ context: |
   Routing requests: a few per minute. Tunnel graph: ~3,000 sections. History
   retention for congestion analytics: 90 days (~1 TB upper bound).
 
+  Vehicles may enter a section only with a signed authorization for the current
+  closure epoch. Authorizations last at most 60 seconds, the longest section
+  traversal is 45 seconds, and a vehicle may not enter unless its authorization
+  covers the whole traversal. Safe stopping bays exist at every section
+  boundary. On a declaration, issuance for that section stops immediately; the
+  90-second activation delay therefore exceeds every outstanding authorization
+  by at least 30 seconds. An offline vehicle may finish its currently authorized
+  section, but must stop at the next bay before entering another one.
+
+  The observed bad telemetry consists only of duplicate reports, non-adjacent
+  beacon transitions, impossible speeds above 50 km/h, or out-of-order sequence
+  numbers; every erroneous report violates at least one of those predicates.
+  Congestion must not block route computation: during telemetry-path failure the
+  router continues from the last accepted congestion view for up to 60 seconds.
+
 constraints:
   - id: C1
     type: consistency
-    value: "a vehicle must never be routed through, or drive into, a section whose closure it has not confirmed; closures take effect immediately"
+    value: "a declaration immediately stops new entry authorizations; activation is 90 seconds later, after all <=60-second authorizations expire; no vehicle may enter an active closure"
   - id: C2
     type: network
-    value: "no GPS; beacon positioning; mesh Wi-Fi with dead zones - vehicles routinely offline up to 2 minutes"
+    value: "no GPS; beacon positioning; mesh Wi-Fi with dead zones - vehicles routinely offline up to 2 minutes; safe bays exist at every section boundary"
   - id: C3
     type: consistency
-    value: "congestion is advisory: eventual freshness within ~60 seconds is acceptable; individual reports may be erroneous"
+    value: "congestion is advisory and propagated asynchronously; route computation must remain available during telemetry-path failure using a last-accepted view no older than 60 seconds"
   - id: C4
     type: team
-    value: "4-person team, two on-prem servers at the mine site; minimal operational surface"
+    value: "4-person team, two on-prem servers; the only approved durable stores are PostgreSQL 16 and MySQL 8, and adding another database technology is not permitted"
   - id: C5
     type: scale
     value: "120 vehicles, 120 telemetry writes/second, ~3,000 graph sections - small scale"
@@ -59,14 +75,14 @@ requirements:
   - id: R1
     text: Compute routes over the tunnel graph for vehicles.
   - id: R2
-    text: Declared closures immediately block affected routes and reach affected vehicles.
+    text: A declaration immediately blocks new entry authorizations, and no vehicle enters the section at or after its 90-second activation.
   - id: R3
     text: Vehicle position reports feed congestion-aware ETAs and route choice.
   - id: R4
     text: A vehicle that loses connectivity behaves safely with respect to closures.
     implicit: true
   - id: R5
-    text: Erroneous position reports do not corrupt routing decisions.
+    text: Reports matching the stated duplicate, sequence, adjacency, or speed error model are rejected before influencing congestion.
     implicit: true
 
 flows:
@@ -82,7 +98,7 @@ flows:
   - id: offline_vehicle
     description: Vehicle behavior while out of coverage in a dead zone.
     decision_slots:
-      policy: [proceed-indefinitely-on-cached-route, halt-when-closure-data-exceeds-staleness-bound]
+      policy: [proceed-on-cached-route-without-authorization, finish-current-authorized-section-then-halt-at-boundary]
 
 relaxation_options: []
 
@@ -112,14 +128,16 @@ gold:
     check: slot_match
     flow: offline_vehicle
     slot: policy
-    acceptable: [halt-when-closure-data-exceeds-staleness-bound]
+    acceptable: [finish-current-authorized-section-then-halt-at-boundary]
   - id: g5
-    dimension: operability
-    check: pattern_required
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
     acceptable: [staleness-fallback]
   - id: g6
-    dimension: tradeoff_selection
-    check: pattern_required
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
     acceptable: [fail-closed]
   - id: g7
     dimension: tradeoff_selection
@@ -131,11 +149,6 @@ gold:
     check: role_forbidden
     role: ingest-store
     forbidden_components: [cassandra-4]
-  - id: g9
-    dimension: requirements_coverage
-    check: coverage
-    requirement: R4
-    acceptable: [staleness-fallback, offline-first-sync, reconciliation-on-reconnect, heartbeat-timeout-detection]
   - id: g10
     dimension: requirements_coverage
     check: coverage
@@ -153,8 +166,8 @@ traps:
     why_attractive: It is exactly how every consumer navigation stack handles road closures, it is one code path instead of two, and "eventually within seconds" sounds close enough — until a vehicle in a dead zone proceeds on a stale plan into a blast zone.
   - id: T2
     description: Make everything strongly consistent, including congestion, "since safety matters here".
-    violated_constraint_id: C2
-    why_attractive: Uniform strictness feels safe and simple. But strong consistency for 120/s advisory telemetry across a mesh network with dead zones couples ETA updates to availability for no safety gain — C3 explicitly licenses eventual congestion, and dead zones make strong-everything unworkable.
+    violated_constraint_id: C3
+    why_attractive: Uniform strictness feels safe and simple. But synchronously coordinating advisory telemetry with route computation prevents the required last-known-view fallback during telemetry-path failure. C3 explicitly requires asynchronous propagation and continued routing availability for this non-safety data.
   - id: T3
     description: Deploy Cassandra for telemetry ingest "because time-series writes at fleet scale".
     violated_constraint_id: C4
@@ -175,25 +188,22 @@ twist:
   twist_gold_refs: [g1, g2, g8]
 
 gold_rationale: |
-  Mixed consistency is entailed, not stylistic. Closures (C1): the cost of a
-  stale closure read is a vehicle entering a blast area — the safety case
-  admits no propagation window, so closure state must be read strongly
-  (single authoritative source, confirmed delivery) and every ambiguity must
-  resolve to "blocked" (fail-closed, g2). The vehicle side is the same rule
-  under partition (C2): in a dead zone a vehicle cannot confirm closure
-  freshness, so beyond a bounded staleness window it must halt or hold at the
-  next beacon (g4/g5) rather than proceed on a cached plan — CAP resolved
-  toward consistency for the safety fact. Congestion (C3) is the mirror image:
-  advisory, tolerant of 60 s staleness, and produced by intermittently
-  connected sources, so coupling it to strong consistency (T2) sacrifices
-  availability under routine partitions for zero safety benefit — CAP resolved
-  toward availability for the advisory fact. One system, two consistency
-  choices, each entailed by its data's failure cost.
+  Mixed consistency is entailed, not stylistic. Closures (C1): the authoritative
+  closure epoch is read strongly and ambiguity resolves to blocked (g1/g2).
+  The authorization timing closes the former partition hole: declaration at T
+  stops issuance immediately; every token expires by T+60; activation is T+90.
+  A disconnected vehicle can finish only a traversal already covered by a
+  token (at most 45 seconds), then stops at the boundary (g4/g5). It therefore
+  cannot enter after activation even during a two-minute dead zone. Congestion
+  is explicitly different: C3 requires asynchronous propagation and routing
+  from a <=60-second last-accepted view when telemetry is unavailable, so a
+  synchronous strong dependency fails the availability rule (g3/T2).
 
   Right-sizing (g7, g8, T3): 120 writes/second and ~1 TB/90 days is roughly
   0.1% of a single PostgreSQL server's comfortable write capacity; the tunnel
-  graph is 3,000 rows. Cassandra brings multi-node operational burden (repair,
-  compaction tuning, consistency-level reasoning) that C4's 4-person team pays
-  with no capacity need. Erroneous reports (R5/g10) are handled by validating
-  at the ingest boundary (admission control: beacon plausibility, rate limits
-  per vehicle) before reports influence congestion state.
+  graph is 3,000 rows. C4 also limits the approved durable-store menu to
+  PostgreSQL/MySQL, so Cassandra is not merely unnecessary but unavailable.
+  Erroneous reports (R5/g10) are handled completely for the stated error model
+  by boundary validation: deduplicate sequence IDs, require adjacent beacon
+  transitions and monotonic sequence numbers, and reject implied speeds above
+  50 km/h before a report can influence congestion.

@@ -14,24 +14,32 @@ problem_statement: |
   - MCU with 256 KB RAM. The safety certification forbids dynamic memory
     allocation after initialization — all buffers are statically sized.
   - 1 MB of flash is available for data buffering (separate from firmware).
+    Power may fail during a flash page program, leaving a torn tail record.
   - The node samples at 1 kHz and reduces samples on-device to feature
     records at 200 bytes/second continuous output.
   - Anomaly detection runs on-device; when an anomaly fires, the surrounding
     30-second full-resolution window (~60 KB) is the high-value payload the
     maintenance team actually needs.
-  - Uplink is NB-IoT budgeted at 5 KB/minute average; connectivity outages
-    of up to 6 hours occur regularly (site radio conditions).
+  - While connected, the NB-IoT uplink sustains 30 KB/minute (500 B/s), leaving
+    drain margin above the feature stream. Connectivity outages of up to 6
+    hours occur regularly (site radio conditions). The certified operating
+    envelope produces at most one 60 KB anomaly window per hour. KB and MB are
+    decimal units in this scenario.
   - Nodes are unattended for months; a hung node is a truck roll.
 
-  The backend must be able to distinguish "no anomalies occurred" from
-  "data was lost" for every reporting interval. Design the buffering,
-  overflow behavior, upload semantics, and recovery posture.
+  After synchronization, the backend must be able to distinguish "no
+  anomalies occurred" from "data was lost" for every reporting interval,
+  including intervals spanning a reset. Design the buffering, overflow
+  behavior, upload semantics, and recovery posture.
 
 context: |
   The 200 B/s feature stream is diagnostic context; anomaly windows drive
   maintenance decisions and revenue. Losing feature records is survivable
   if it is DETECTABLE; losing anomaly windows is not acceptable while any
-  buffer space remains.
+  buffer space remains. The flash driver reserves two alternating journal
+  header pages. It never erases the last valid header until its successor has
+  been checksummed, committed, and read back; payload writes begin only after
+  the corresponding sequence-range reservation is verified.
 
 constraints:
   - id: C1
@@ -39,23 +47,30 @@ constraints:
     value: "256 KB RAM, no dynamic allocation after init (certification); 1 MB flash for data buffering"
   - id: C2
     type: network
-    value: "NB-IoT uplink ~5 KB/minute average; outages up to 6 hours are routine"
+    value: "connected NB-IoT uplink sustains 30 KB/minute (500 B/s), above the 200 B/s feature rate plus at most one 60KB anomaly window/hour; outages up to 6 hours are routine"
   - id: C3
     type: durability
     value: "backend must distinguish 'no anomalies' from 'data lost' for every interval; anomaly windows must survive while any buffer space remains"
   - id: C4
     type: team
     value: "unattended for months; hung node = truck roll; firmware must self-recover"
+  - id: C5
+    type: durability
+    value: "power may tear a flash page program; after reboot every committed record and persistent sequence range must be recovered, and every torn/uncommitted range must be reported as loss rather than silently forgotten"
 
 requirements:
   - id: R1
-    text: Continuous feature stream (200 B/s) uploaded when connectivity allows.
+    text: Buffer the continuous feature stream within the fixed RAM/flash limits, with explicit overflow behavior.
   - id: R2
     text: Anomaly windows are preserved preferentially and delivered reliably.
   - id: R3
-    text: The backend can always tell whether data was lost.
+    text: After synchronization, the backend can classify every reporting interval as complete or identify its lost sequence ranges.
   - id: R4
     text: The node recovers from hangs/crashes without human intervention.
+  - id: R5
+    text: Power loss during a flash write cannot silently erase committed records or loss-accounting metadata.
+  - id: R6
+    text: Deliver every retained feature record and anomaly window reliably, using connected-time drain margin to clear backlog.
 
 flows:
   - id: buffering
@@ -70,6 +85,11 @@ flows:
     description: Upload semantics over the lossy, intermittent uplink.
     decision_slots:
       semantics: [sequenced-at-least-once-with-server-dedup, fire-and-forget]
+      loss_accounting: [persistent-sequence-ranges-and-interval-manifests, volatile-sequence-counter]
+  - id: flash_recovery
+    description: How flash records and queue metadata commit across arbitrary power loss.
+    decision_slots:
+      metadata_commit: [append-only-checksummed-journal-with-commit-markers, in-place-metadata-overwrite]
 
 relaxation_options: []
 
@@ -83,33 +103,39 @@ gold:
     slot: structure
     acceptable: [statically-sized-bounded-ring-buffers]
   - id: g2
-    dimension: operability
-    check: pattern_required
-    acceptable: [bounded-queues]
-  - id: g3
     dimension: tradeoff_selection
     check: slot_match
     flow: overflow
     slot: policy
     acceptable: [drop-oldest-feature-records-preserve-anomaly-windows]
-  - id: g4
+  - id: g3
     dimension: tradeoff_selection
     check: slot_match
     flow: upload
     slot: semantics
     acceptable: [sequenced-at-least-once-with-server-dedup]
+  - id: g4
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: upload
+    slot: loss_accounting
+    acceptable: [persistent-sequence-ranges-and-interval-manifests]
   - id: g5
-    dimension: operability
-    check: pattern_required
-    acceptable: [at-least-once-with-dedup]
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: flash_recovery
+    slot: metadata_commit
+    acceptable: [append-only-checksummed-journal-with-commit-markers]
   - id: g6
-    dimension: operability
-    check: pattern_required
-    acceptable: [gap-detection]
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [bounded-queues]
   - id: g7
-    dimension: operability
-    check: pattern_required
-    acceptable: [watchdog-timer]
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [priority-queues]
   - id: g8
     dimension: requirements_coverage
     check: coverage
@@ -121,6 +147,16 @@ gold:
     requirement: R4
     acceptable: [watchdog-timer]
   - id: g10
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R5
+    acceptable: [write-ahead-log]
+  - id: g11
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R6
+    acceptable: [at-least-once-with-dedup]
+  - id: g12
     dimension: parsimony
     check: parsimony
     max_patterns: 7
@@ -138,6 +174,10 @@ traps:
     description: Fire-and-forget uploads to keep firmware simple.
     violated_constraint_id: C3
     why_attractive: Dedup and sequencing feel like server-grade machinery for a 200 B/s stream. But without sequence numbers the backend cannot distinguish 'quiet pump' from 'lost data' (C3's exact requirement), and NB-IoT loses frames routinely.
+  - id: T4
+    description: Update ring pointers and sequence metadata in place to save flash writes.
+    violated_constraint_id: C5
+    why_attractive: In-place metadata is compact, but a torn page can destroy the only queue head or sequence high-water mark. An append-only checksummed journal with commit markers lets reboot scanning recover committed records and classify an unfinished reservation as loss.
 
 twist:
   description: >
@@ -146,36 +186,49 @@ twist:
     the scored design decision is WHICH data dies and how the loss stays
     visible.
   invalidated_canonical: >
-    "Buffer durably until connectivity returns" fails g3/T1 by simple
+    "Buffer durably until connectivity returns" fails g2/T1 by simple
     arithmetic (4.32 MB of outage data vs 1 MB of flash). The entailed
     design: statically bounded ring buffers, an explicit shed policy that
     ranks anomaly windows above feature records, sequence numbers so every
     drop is detectable server-side, and a watchdog for unattended recovery.
-  twist_gold_refs: [g1, g3]
+  twist_gold_refs: [g1, g2]
 
 gold_rationale: |
-  Overflow arithmetic (g1-g3, T1): a routine 6-hour outage produces
+  Rate and overflow arithmetic (g1, g2, g6, T1): while connected, 30 KB/min
+  is 500 B/s. The 200 B/s feature source therefore leaves 300 B/s for draining
+  backlog and anomaly windows. At the maximum anomaly rate, windows add
+  60,000/3,600 = 16.7 B/s, so total production is 216.7 B/s and backlog still
+  drains at 283.3 B/s. A full 1 MB backlog drains in about 3,333 seconds
+  (56 minutes) if no anomaly arrives. A routine 6-hour outage still produces
   200 B/s x 21,600 s = 4.32 MB of feature records, 4.3x the 1 MB flash
   budget — before any anomaly window (60 KB each) lands. Buffering
   everything is therefore impossible: some data WILL be dropped during long
   outages, and the only design freedom is the policy. C3 ranks the data:
   anomaly windows (the revenue payload, ~60 KB each, rare) are preserved;
-  oldest feature records (continuous, diagnostic-only) are shed first. A
-  1 MB flash ring holds ~80 minutes of features plus several anomaly
-  windows — ample for typical outages, degrading deliberately in long ones.
+  oldest feature records (continuous, diagnostic-only) are shed first. With
+  decimal units, 1 MB holds 5,000 seconds = 83.3 minutes of features if no
+  anomaly window is present. Three 60 KB windows leave 820 KB, or 68.3 minutes
+  of features; the design never claims both capacities at once.
 
-  No-heap rule (g1, g2, T2): certification forbids post-init allocation, so
+  No-heap rule (g1, g6, T2): certification forbids post-init allocation, so
   every buffer is a statically sized bounded ring — bounded-queues is not a
   scalability nicety here but a compliance requirement, and overflow
   behavior must be designed rather than discovered.
 
-  Detectable loss (g4-g6, g8, T3): C3 requires distinguishing quiet from
-  lossy intervals. Monotonic sequence numbers on every record give the
-  backend gap-detection; retransmission of unacked records with server-side
-  dedup (at-least-once + dedup) handles NB-IoT frame loss without
-  double-counting. Fire-and-forget makes every loss silent — the exact
-  failure C3 names.
+  Priority, delivery, and detectable loss (g2-g4, g7, g8, g11, T3): separate
+  priority classes ensure anomaly windows displace feature records whenever
+  the fixed buffers contend. Retransmission of unacknowledged retained records
+  with server-side dedup handles NB-IoT frame loss without double-counting.
+  Persistent sequence ranges plus a completion manifest for each reporting
+  interval let the backend distinguish a complete quiet interval from explicit
+  dropped ranges after synchronization. A later record alone is not the only
+  evidence, so a lost tail remains classifiable.
 
-  Unattended recovery (g7, g9, C4): a hardware watchdog reset is the only
-  recovery mechanism that works with no human and no connectivity;
-  buffered data in flash survives the reset by design.
+  Crash safety and unattended recovery (g5, g9, g10, T4): before writing a
+  payload, the append-only flash journal commits and read-verifies its sequence
+  reservation in the alternate header; only then may payload programming
+  begin. A checksummed payload and commit marker complete it. On boot, scanning
+  the journal recovers every commit and turns an unfinished verified reservation
+  into an explicit lost range for the interval manifest. A hardware watchdog resets
+  a hung node without requiring a human or network path; the journal, rather
+  than volatile queue pointers, preserves buffered state and accounting.

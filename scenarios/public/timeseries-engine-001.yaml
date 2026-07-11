@@ -32,7 +32,10 @@ problem_statement: |
   2 GB/s of sequential writes. Prototype measurements for this workload show
   update-in-place B-tree batching still needs at least one random page write
   per eight points, while an LSM configuration has <=8x total write
-  amplification. The 13-month aggregate set is 120 TB logical; the cold-tier
+  amplification. Under the full 5M-point/s ingest and worst-case 8x compaction
+  load, the prototype LSM with a sparse per-series secondary index measures
+  recent-range p99 at 135 ms; without that index it measures 430 ms. The
+  13-month aggregate set is 120 TB logical; the cold-tier
   storage cap is 30 TB. Measured compression is 6:1 for columnar segments and
   at best 2:1 for the row-oriented alternative.
 
@@ -54,7 +57,7 @@ constraints:
     value: "5M points/second sustained ingest (~7 TB/day raw); fixed hot tier allows 250K random 4KB writes/s or 2GB/s sequential; measured B-tree >=1 random page write/8 points and LSM <=8x sequential write amplification"
   - id: C2
     type: latency
-    value: "recent per-series range queries p99 <= 200 ms; historical/aggregate queries tolerate seconds"
+    value: "recent per-series range queries p99 <=200 ms; measured indexed LSM is 135 ms under full ingest/compaction while unindexed LSM is 430 ms; historical queries tolerate seconds"
   - id: C3
     type: compliance
     value: "per-tenant erasure verifiably complete within 30 days of request, including inside the 13-month aggregate retention window; requests arrive weekly"
@@ -99,54 +102,37 @@ gold:
     acceptable: [lsm-style-append-and-merge]
   - id: g2
     dimension: tradeoff_selection
-    check: pattern_required
-    acceptable: [lsm-tree]
-  - id: g3
-    dimension: tradeoff_selection
     check: slot_match
     flow: cold_layout
     slot: layout
     acceptable: [columnar-immutable-segments]
-  - id: g4
-    dimension: tradeoff_selection
-    check: pattern_required
-    acceptable: [columnar-segments]
-  - id: g5
+  - id: g3
     dimension: tradeoff_selection
     check: slot_match
     flow: erasure
     slot: mechanism
     acceptable: [per-tenant-crypto-shredding]
-  - id: g6
-    dimension: tradeoff_selection
-    check: pattern_required
-    acceptable: [crypto-shredding]
-  - id: g7
+  - id: g4
     dimension: tradeoff_selection
     check: pattern_required
     acceptable: [time-series-rollups]
-  - id: g8
+  - id: g5
     dimension: tradeoff_selection
     check: pattern_required
     acceptable: [ttl-expiry]
-  - id: g9
+  - id: g6
     dimension: operability
     check: pattern_required
     acceptable: [compaction-strategy]
-  - id: g10
+  - id: g7
     dimension: requirements_coverage
     check: coverage
-    requirement: R4
-    acceptable: [crypto-shredding]
-  - id: g11
-    dimension: requirements_coverage
-    check: coverage
-    requirement: R3
-    acceptable: [time-series-rollups, columnar-segments]
-  - id: g12
+    requirement: R2
+    acceptable: [secondary-indexes]
+  - id: g8
     dimension: parsimony
     check: parsimony
-    max_patterns: 9
+    max_patterns: 8
 
 traps:
   - id: T1
@@ -174,22 +160,24 @@ twist:
   invalidated_canonical: >
     The TSDB canon (immutable columnar segments, "deletes are just retention
     expiry" — the documented posture of mainstream time-series engines) fails
-    g5/g6/g10: with weekly erasure requests, a 13-month window, and
+    g3: with weekly erasure requests, a 13-month window, and
     commingled segments, neither segment rewriting nor wait-for-retention
     survives the explicit caps. Per-tenant encryption keys with audited key
     destruction (crypto-shredding) is the only listed mechanism satisfying C3
     within C4, and the regulator explicitly accepts it.
-  twist_gold_refs: [g5, g6, g10]
+  twist_gold_refs: [g3]
 
 gold_rationale: |
-  Write path (g1, g2, T1): 5M x 16 bytes = 80 MB/s raw. The measured B-tree
+  Write path (g1, g6, g7, T1): 5M x 16 bytes = 80 MB/s raw. The measured B-tree
   floor is 5M/8 = 625K random page writes/s, 2.5x the 250K fixed-hardware
   ceiling. LSM sequential traffic is at most 80 MB/s x8 = 640 MB/s, only 32%
-  of the 2 GB/s sequential budget. Compaction (g9) is required to bound the
-  resulting immutable runs. The slot is pinned by measured resource bounds,
-  not by a generic preference for LSM trees.
+  of the 2 GB/s sequential budget. Compaction (g6) is required to bound the
+  resulting immutable runs. At that full load, the indexed LSM's measured
+  recent-range p99 is 135 ms and meets C2; the unindexed 430 ms result makes the
+  sparse per-series secondary index required coverage for R2 (g7). The slot is
+  pinned by measured resource bounds, not by a generic preference for LSM.
 
-  Cold layout and rollups (g3, g4, g7, g8, g11): dashboards hit recent raw
+  Cold layout and rollups (g2, g4, g5): dashboards hit recent raw
   data (row-ish recent tier is fine in the memtable/hot tier), while
   13-month queries hit aggregates. The aggregate set is 120 TB logical:
   measured 6:1 columnar compression yields 20 TB and fits the 30 TB cap;
@@ -197,7 +185,8 @@ gold_rationale: |
   segments therefore jointly make R3 affordable. TTL expiry implements both
   retention edges (30-day raw, 13-month aggregates).
 
-  Erasure (g5, g6, g10, T2, T3): the three mechanisms are exhaustive.
+  Erasure (g3, T2, T3): the three listed mechanisms are exhaustive for the
+  stated shared immutable layout.
   Rewriting one typical tenant touches ~20 TB, already 4x the entire 5 TB
   monthly rewrite allowance; weekly requests widen the gap to ~16x. Deferral:
   13 months > 30 days (C3 rules this out, flatly). Crypto-shredding:

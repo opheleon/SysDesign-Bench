@@ -22,6 +22,16 @@ problem_statement: |
     (100 devices), and a systematic bricking defect is existential.
   - Devices check in over cellular on their own schedule (see connectivity
     agreement excerpt below) and pull updates when they check in.
+  - The first field cohort must contain exactly 20 continuously connected,
+    hardware-representative devices. Only one cohort may be open at a time.
+    A device must report a verified boot or automatic rollback within 15
+    minutes of activating the new image; no report is conservatively counted
+    as a potential brick. Any potential brick or health regression halts the
+    campaign. Every later cohort is capped at `100 - cumulative potential
+    bricks`, so even complete failure of the open cohort cannot exceed the
+    campaign's 100-device loss budget. The certified boot contract guarantees
+    that any update-induced loss of bootability manifests before that report;
+    later runtime hangs are caught by the watchdog and boot fallback.
 
   Design the update mechanism on-device, the campaign rollout strategy, and
   the server-side posture during a campaign.
@@ -34,10 +44,13 @@ context: |
   (approximately 30% of deployed units), devices may batch check-ins to
   conserve power; the Supplier warrants only that each such device checks
   in at least once per 10-week period. §3.2 The BLE diagnostic port is
-  reserved for commissioning and is not available for remote operations.
-  §5.1 Firmware manifests were migrated from XML to CBOR in rev 3; XML
-  manifests remain readable by bootloaders prior to build 240 but are
-  deprecated."
+  reserved for commissioning and is not available for remote operations."
+
+  The deployed updater population is mixed: 18,000 devices running builds
+  before 240 accept ONLY XML manifests, while the remaining 82,000 accept ONLY
+  CBOR manifests. A successful update moves a pre-240 device to the CBOR
+  protocol, but until it checks in it can request only XML. The check-in request
+  identifies the updater build, so the server can return the matching manifest.
 
   Fleet telemetry shows the previous campaign's check-in histogram matched
   §2.4: half the fleet within 3 days, 95% within 3 weeks, the last few
@@ -56,6 +69,9 @@ constraints:
   - id: C4
     type: scale
     value: "100,000 devices; flash holds two full firmware images"
+  - id: C5
+    type: durability
+    value: "initial field cohort is exactly 20 devices; one open cohort at a time; any missing 15-minute boot/rollback report halts rollout and counts toward the 100-device budget; each next cohort size is <=100 minus cumulative potential bricks"
 
 requirements:
   - id: R1
@@ -80,7 +96,7 @@ flows:
   - id: rollout
     description: How the campaign exposes the fleet to the new build.
     decision_slots:
-      strategy: [staged-cohorts-with-health-gates, fleet-wide-immediately]
+      strategy: [twenty-device-canary-then-one-health-gated-cohort-at-a-time-with-remaining-brick-budget-cap, staged-cohorts-without-a-size-or-abort-cap, fleet-wide-immediately]
   - id: campaign_window
     description: Planning assumption for campaign completion.
     decision_slots:
@@ -98,8 +114,9 @@ gold:
     slot: strategy
     acceptable: [write-to-inactive-partition-atomic-switch]
   - id: g2
-    dimension: migration_safety
-    check: pattern_required
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
     acceptable: [ab-partition-update]
   - id: g3
     dimension: migration_safety
@@ -108,18 +125,20 @@ gold:
     slot: policy
     acceptable: [auto-rollback-to-previous-partition]
   - id: g4
-    dimension: operability
-    check: pattern_required
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
     acceptable: [watchdog-timer]
   - id: g5
     dimension: migration_safety
     check: slot_match
     flow: rollout
     slot: strategy
-    acceptable: [staged-cohorts-with-health-gates]
+    acceptable: [twenty-device-canary-then-one-health-gated-cohort-at-a-time-with-remaining-brick-budget-cap]
   - id: g6
-    dimension: migration_safety
-    check: pattern_required
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
     acceptable: [staged-rollout]
   - id: g7
     dimension: migration_safety
@@ -128,33 +147,24 @@ gold:
     slot: assumption
     acceptable: [multi-month-tail-expected]
   - id: g8
-    dimension: migration_safety
-    check: pattern_required
-    acceptable: [versioned-api-compatibility]
-  - id: g9
     dimension: requirements_coverage
     check: coverage
     requirement: R3
     acceptable: [versioned-api-compatibility]
-  - id: g10
-    dimension: requirements_coverage
-    check: coverage
-    requirement: R4
-    acceptable: [ab-partition-update, watchdog-timer]
-  - id: g11
+  - id: g9
     dimension: parsimony
     check: parsimony
-    max_patterns: 8
+    max_patterns: 6
 
 traps:
   - id: T1
     description: Flash the new image over the running image ("the device only needs one image slot; use the rest of flash for data").
     violated_constraint_id: C1
-    why_attractive: Reclaiming half the firmware flash is a real, tempting win on a constrained device. But with in-place overwrite, a power loss mid-flash leaves NO bootable image — and power loss at any instant is a stated operating condition, not a corner case. Across 100k devices per campaign, mid-flash losses alone would blow the 0.1% budget.
+    why_attractive: Reclaiming half the firmware flash is a real, tempting win on a constrained device. But with in-place overwrite, any allowed power loss mid-flash can leave no bootable image, so it cannot satisfy R1's no-risk requirement. A/B flashing preserves the old image and turns the same loss into a retry.
   - id: T2
     description: Push the build fleet-wide immediately to meet the patch cadence.
-    violated_constraint_id: C2
-    why_attractive: The security contract creates urgency, and staging feels like delay. But a systematic defect shipped fleet-wide converts one bad build into up to 100,000 x $400 of field visits; health-gated cohorts cap the exposure at the first gate while still patching the reachable fleet fast.
+    violated_constraint_id: C5
+    why_attractive: The security contract creates urgency, and staging feels like delay. But a systematic defect shipped fleet-wide can convert one bad build into up to 100,000 x $400 of field visits. A 20-device canary and one open, budget-capped cohort make the maximum unresolved exposure explicit and keep it within 100 devices.
   - id: T3
     description: Plan the campaign as a two-week event; treat stragglers as exceptions and retire the old firmware's server support when the campaign "ends".
     violated_constraint_id: C3
@@ -169,38 +179,40 @@ twist:
     makes the campaign tail ten weeks minimum.
   invalidated_canonical: >
     The CI/CD rollout canon (push to the fleet, watch dashboards, roll back
-    from the server) fails g1/g3/g7: there is no push channel, no central
-    rollback for a device that cannot boot, and no two-week campaign — the
-    §2.4 check-in warranty (the buried fact) forces a multi-month tail with
-    versioned server-side compatibility for old firmware throughout.
-  twist_gold_refs: [g1, g3, g7]
+    from the server) fails g1/g3/g5/g7: there is no push channel, no central
+    rollback for a device that cannot boot, no unbounded first cohort, and no
+    two-week campaign — the §2.4 check-in warranty forces a multi-month tail
+    with both XML and CBOR server support throughout.
+  twist_gold_refs: [g1, g3, g5, g7]
 
 gold_rationale: |
   Power-loss safety (g1, g2, T1): flash holds two images (C4) precisely so
   the new image is written entirely to the inactive partition and activated
   by an atomic boot-flag switch. At every instant of the write, the old
   image remains intact and bootable — power loss costs a retry, not a
-  brick. In-place overwrite makes every mid-write loss a $400 visit; with
-  ~even a 0.05% chance of power loss during a multi-minute flash window per
-  device, in-place alone consumes the campaign brick budget.
+  brick. In-place overwrite provides no bootable-image guarantee for the
+  explicitly allowed mid-write power loss and therefore cannot satisfy R1.
 
-  On-device recovery (g3, g4, g10, R4): a new image that boots but fails
+  On-device recovery (g3, g4, R4): a new image that boots but fails
   health checks (or hangs, caught by the watchdog) must revert WITHOUT the
   server: the bootloader falls back to the previous partition after N
   failed boots. Retry-forever wedges the device; wait-for-rescue assumes a
   push channel that does not exist (§2.1: devices initiate).
 
-  Blast-radius control (g5, g6, T2): cohort gates with health criteria
-  (successful boot + check-in rate of updated cohort) cap a systematic
-  defect's exposure at the first cohort (e.g. 1% = 1,000 devices held to
-  the 0.1% budget by the gate), satisfying C2's "before broad exposure".
+  Blast-radius control (g5, g6, T2): the first open cohort is 20 devices.
+  Every device must report verified boot or automatic rollback within 15
+  minutes; one missing report or health regression halts expansion. If all 20
+  fail, cumulative potential bricks are 20, below 100. After a clean or
+  investigated gate, each later cohort is at most `100 - cumulative potential
+  bricks`, and only one is open. Even complete failure of that cohort makes the
+  cumulative maximum 100, never 101. A generic "staged rollout" with a 1%
+  first cohort would expose 1,000 devices and is therefore not acceptable.
 
-  The buried tail (g7, g8, g9, T3): §2.4 warrants one check-in per 10 weeks
-  for ~30% of devices — so a campaign mathematically cannot complete in two
-  weeks, and the histogram in context confirms a multi-month tail. The
-  server must therefore accept old-firmware protocols/manifests for the
-  entire tail (versioned compatibility), and campaign accounting must treat
-  the tail as normal. Decoys: the BLE port (§3.2) is explicitly unavailable
-  for remote ops, and the XML/CBOR manifest note (§5.1) affects only
-  pre-240 bootloaders — neither changes the design; reacting to them is
-  pattern spray the parsimony cap punishes.
+  The tail and protocol split (g7, g8, T3): §2.4 guarantees only one check-in
+  per 10 weeks for ~30% of devices, so completion cannot be guaranteed inside
+  two weeks and prior telemetry confirms a multi-month tail. The 18,000
+  pre-240 devices can request only XML until they update, while 82,000 newer
+  devices request only CBOR. The server must select the manifest by updater
+  version and retain both protocols for the entire tail; versioned API
+  compatibility is therefore load-bearing. The BLE port is the sole decoy: it
+  is explicitly unavailable for remote operations.

@@ -14,13 +14,21 @@ problem_statement: |
   the venue. Market data is delivered as UDP multicast with sequence numbers on
   every message; measured packet loss ranges 0.1–1%. The venue publishes the
   same data on two redundant multicast feeds (A and B) with independent network
-  paths. Order entry is a separate reliable session protocol provided by the
-  venue and is not part of this design problem.
+  paths. Per-message loss is independent between feeds and independent over
+  time. Each feed emits a sequenced heartbeat at least every 10 ms when there is
+  no update. A reliable recovery service returns a missing range or signed book
+  snapshot within a hard 40 ms bound; the engine remains pulled if recovery is
+  unavailable. Order entry is a separate reliable session protocol. A cancel
+  sent by the firm is applied at the venue within a hard 40 ms bound.
 
-  The firm's risk policy is absolute: never post or maintain quotes based on
-  market data that may be missing updates or is older than 250 ms. Regulators
-  additionally require pre-trade risk checks on every outbound order and a
-  complete, reconstructible record of every quote decision.
+  The firm's risk policy is absolute and operationally testable: on a detected
+  sequence gap, the engine must immediately pull all quotes and may not resume
+  until gap-fill or a signed snapshot restores a contiguous book. A quote may
+  never remain live at the venue when its underlying data is older than 250 ms.
+  Feed timestamps and the firm's clock differ by at most 5 ms, so the local
+  pull threshold is 200 ms: 200 + 5 ms clock error + 40 ms cancel bound = 245 ms.
+  Regulators additionally require pre-trade risk checks on every outbound order
+  and a complete, reconstructible record of every quote decision.
 
   Larger competitors ARE colocated at the venue with microsecond-scale
   tick-to-trade. The firm's leadership understands they cannot win speed races
@@ -32,31 +40,43 @@ problem_statement: |
 context: |
   Message rate: ~10,000 market-data messages/second at peak. Quote update
   decisions are made in software on commodity servers. The venue's A and B
-  feeds each carry the full data stream.
+  feeds each carry the full data stream. At peak, quoting must be active at
+  least 95% of the time, excluding a venue or order-session outage. Every gap
+  causes a 40 ms recovery/pulled interval. The internal decision path has a
+  p99 <= 2 ms budget. A dedicated local WAL sustains 10,000 decision records/s
+  with p99 durable append <= 0.3 ms; the approved remote audit stores measure
+  5-12 ms per synchronous commit. The local record is durable before an order
+  is sent and is archived asynchronously within one second.
 
 constraints:
   - id: C1
     type: network
-    value: "no colocation; 20-40 ms jittery RTT to the venue; UDP multicast market data with 0.1-1% packet loss"
+    value: "no colocation; 20-40 ms RTT; two full UDP feeds with 0.1-1% iid per-message loss independent across feeds; <=10 ms sequenced heartbeats; reliable gap-fill/snapshot <=40 ms"
   - id: C2
     type: compliance
-    value: "never quote on market data that may be missing updates or is older than 250 ms"
+    value: "pull immediately on a detected gap and resume only from a contiguous recovered book; send age-based pulls at 200 ms so venue removal occurs by 245 ms, below the 250 ms hard limit"
   - id: C3
     type: compliance
-    value: "pre-trade risk checks on every outbound order; complete reconstructible record of every quote decision"
+    value: "pre-trade risk checks on every outbound order; each durable decision record includes input sequence/watermark, quote output, risk result, configuration and software versions, and timestamps"
   - id: C4
     type: budget
     value: "5 engineers, modest infrastructure budget; leadership explicitly declines the speed-race arms race"
+  - id: C5
+    type: latency
+    value: "internal decision path p99 <=2 ms; local WAL append p99 <=0.3 ms at 10K records/s; synchronous remote audit commit is measured at 5-12 ms"
+  - id: C6
+    type: availability
+    value: "quoting is active >=95% at peak excluding venue/order-session outages; each unresolved gap pulls quotes for <=40 ms"
 
 requirements:
   - id: R1
     text: Maintain two-sided quotes driven by live market data.
   - id: R2
-    text: Detect when market data is incomplete or stale and react safely.
+    text: Detect gaps within the heartbeat bound, pull immediately, recover a contiguous book, and initiate age-based cancellation at 200 ms.
   - id: R3
     text: An operator can instantly halt all quoting.
   - id: R4
-    text: Every quote decision and outbound order is durably recorded for reconstruction.
+    text: Before order transmission, durably record the exact input sequence, output, risk result, configuration/software versions, and timestamps needed for reconstruction.
     implicit: true
   - id: R5
     text: Every outbound order passes pre-trade risk limits before leaving the firm.
@@ -66,12 +86,13 @@ flows:
   - id: market_data
     description: Ingesting the venue's lossy UDP multicast feeds and deciding quote updates.
     decision_slots:
-      staleness_policy: [quote-through-gaps, widen-or-pull-on-staleness]
+      staleness_policy: [quote-or-widen-through-gaps, pull-on-gap-and-at-200ms-local-age]
       feed_strategy: [single-feed, arbitrate-both-feeds]
   - id: decision_audit
     description: Recording quote decisions and orders for regulatory reconstruction.
     decision_slots:
-      hot_path_coupling: [synchronous-blocking-quote-path, buffered-durable-off-path]
+      durability_path: [synchronous-remote-commit, synchronous-local-wal-then-async-archive]
+      record_scope: [outputs-only, inputs-config-risk-and-outputs]
 
 relaxation_options: []
 
@@ -91,7 +112,7 @@ gold:
     check: slot_match
     flow: market_data
     slot: staleness_policy
-    acceptable: [widen-or-pull-on-staleness]
+    acceptable: [pull-on-gap-and-at-200ms-local-age]
   - id: g4
     dimension: tradeoff_selection
     check: slot_match
@@ -114,7 +135,7 @@ gold:
     dimension: requirements_coverage
     check: coverage
     requirement: R4
-    acceptable: [append-only-log, temporal-audit-log, write-ahead-log]
+    acceptable: [append-only-log, write-ahead-log]
   - id: g9
     dimension: requirements_coverage
     check: coverage
@@ -124,14 +145,20 @@ gold:
     dimension: operability
     check: slot_match
     flow: decision_audit
-    slot: hot_path_coupling
-    acceptable: [buffered-durable-off-path]
+    slot: durability_path
+    acceptable: [synchronous-local-wal-then-async-archive]
   - id: g11
     dimension: tradeoff_selection
     check: role_required
     acceptable_roles: [cold-path-persistence, system-of-record, ingest-store, message-queue]
-    acceptable_components: [postgresql-16, mysql-8, kafka]
+    acceptable_components: [postgresql-16, mysql-8, mongodb-7, kafka, rabbitmq]
   - id: g12
+    dimension: requirements_coverage
+    check: slot_match
+    flow: decision_audit
+    slot: record_scope
+    acceptable: [inputs-config-risk-and-outputs]
+  - id: g13
     dimension: parsimony
     check: parsimony
     max_patterns: 10
@@ -142,13 +169,13 @@ traps:
     violated_constraint_id: C4
     why_attractive: It is the canonical trading-systems answer; every HFT blog post recommends it. But saving 20-50 microseconds against a 20,000-40,000 microsecond jittery WAN RTT buys nothing, and colocated competitors win the race regardless — it is pure cost with no benefit, which C4 explicitly declines.
   - id: T2
-    description: Keep quoting through detected feed gaps or staleness ("the market moves fast; a few missing ticks won't matter").
+    description: Keep or merely widen quotes through a detected feed gap, or wait until local data age reaches 250 ms before sending cancellation.
     violated_constraint_id: C2
-    why_attractive: Pulling quotes costs revenue and reconnecting/recovering takes time; quoting through feels pragmatic. But at 10k msgs/s and 0.1-1% loss, gaps occur constantly, and quoting on a book with phantom state is exactly what the risk policy forbids.
+    why_attractive: Pulling quotes costs revenue, but widening still leaves a quote based on an incomplete book. Waiting locally until 250 ms is also too late because cancellation takes up to 40 ms. C2 supplies the safe 200 ms threshold and requires a full pull until contiguous recovery.
   - id: T3
     description: Synchronously commit every quote decision to a remote database inside the quote-update path.
-    violated_constraint_id: C1
-    why_attractive: '"Audit means write to the database first" is the safe-sounding reading of C3 — but a synchronous remote commit per decision at 10k msgs/s couples quoting latency to the database and adds nothing for reconstruction that a locally durable buffered log does not provide.'
+    violated_constraint_id: C5
+    why_attractive: '"Audit means write to the database first" is the safe-sounding reading of C3. But the measured 5-12 ms remote commit cannot meet the 2 ms internal path budget. A <=0.3 ms synchronous local WAL append preserves crash-complete audit before order transmission, then asynchronous archival keeps the remote store off the decision path.'
 
 twist:
   description: >
@@ -172,20 +199,21 @@ gold_rationale: |
   similarly irrelevant at this distance. The race is lost by four orders of
   magnitude before software starts; spending against it violates C4.
 
-  Gap math (g1-g5, T2): at 10,000 msgs/s with 0.1-1% loss, expect 10-100 lost
-  messages per second per feed. Sequence-number gap detection is therefore not
-  an edge case but a continuous operating condition. Independent A/B paths make
-  simultaneous loss of the same message approximately the product of the loss
-  rates (~1e-6 to 1e-4), so arbitrating both feeds cuts effective gaps by 2-4
-  orders of magnitude. When a gap or >250 ms staleness is detected anyway, C2
-  admits exactly one behavior: stop trusting the book — widen or pull quotes
-  (staleness-fallback) until recovery. Quoting through gaps is a direct C2
-  violation.
+  Gap and availability math (g1-g5, T2): at 10,000 msgs/s, a single feed's best
+  stated loss rate is 0.1%, or 10 gaps/s. With a 40 ms recovery interval, its
+  active fraction is approximately (1-0.001)^400 = 67%, below C6's 95% target.
+  With independent A/B feeds, the worst simultaneous-loss probability is
+  0.01^2 = 1e-4; the active fraction is (1-1e-4)^400 = 96.1%, so arbitration is
+  the only listed strategy meeting C6 throughout the stated loss range.
+  Sequenced <=10 ms heartbeats expose a trailing loss and the bounded recovery
+  channel restores a contiguous book. On any detected gap the only C2-compliant
+  behavior is to pull, not widen. Independently, a pull sent at 200 ms reaches
+  the venue by 200+5+40=245 ms, inside the 250 ms live-quote bound.
 
-  Audit placement (g8, g10, g11, T3): C3 requires complete reconstruction, not
-  synchronous remote commits. A locally durable append-only/WAL-style record
-  drained to cold-path storage preserves completeness; a synchronous remote DB
-  write per decision at 10k msgs/s adds a network dependency to the quote path
-  (C1) with no completeness gain. Pre-trade risk checks (g9) are admission
-  control at the order boundary and are the one thing that must sit
-  synchronously in the outbound path — which is why the audit write must not.
+  Audit placement (g8-g12, T3): C3 requires crash-complete reconstruction before
+  an order leaves, not a remote commit. The measured synchronous local WAL append
+  is <=0.3 ms and fits C5; the 5-12 ms remote commit does not. The engine first
+  appends input watermark/sequence, output, risk result, config/software versions
+  and timestamps to that WAL, then sends the already risk-checked order and
+  archives within one second. Pre-trade risk checks (g9) remain synchronous
+  admission control at the outbound boundary.

@@ -1,7 +1,7 @@
 # Minimal pair with chat-presence-2m-001: the same chat surface at 1/1000th
-# the scale. Every big-chat reflex (Kafka, Cassandra, sharding, CQRS) is
-# scored over-engineering; one relational primary plus a WebSocket tier is
-# the entailed answer. Easy floor item for the parsimony dimension.
+# the scale. Every big-chat reflex (Kafka, Cassandra, sharding) is
+# scored over-engineering; one general-purpose durable primary plus a simple
+# push/poll tier is sufficient. Easy floor item for the parsimony dimension.
 instance_id: chat-smallscale-001
 domain: workplace-chat
 difficulty: easy
@@ -23,7 +23,11 @@ problem_statement: |
 context: |
   Growth is bounded by headcount (~5%/year). No external users. The old
   system's outages were caused by unattended complexity, which is why the
-  team insists on something they can operate themselves.
+  team insists on something they can operate themselves. All services must run
+  on the two on-prem VMs. The operating approval permits exactly one stateful
+  subsystem: a PostgreSQL, MySQL, or MongoDB primary. Those are the only
+  approved system-of-record choices; a separately operated broker, search
+  datastore, or other database technology is not approved.
 
 constraints:
   - id: C1
@@ -31,14 +35,14 @@ constraints:
     value: "1,200 peak concurrent clients; 50 messages/second peak; 40 GB history over 5 years"
   - id: C2
     type: team
-    value: "2-person team, two on-prem VMs; the operability of the system by this team is an explicit requirement"
+    value: "2-person team, two on-prem VMs; exactly one stateful subsystem is approved, chosen from PostgreSQL, MySQL, or MongoDB; no separate broker or search datastore"
   - id: C3
     type: durability
     value: "accepted messages are never lost; per-conversation consistent ordering"
 
 requirements:
   - id: R1
-    text: Real-time message delivery with per-conversation ordering.
+    text: Acknowledge messages only after durable storage, then deliver them in per-conversation order.
   - id: R2
     text: Full-text search over message history.
   - id: R3
@@ -62,7 +66,7 @@ gold:
     dimension: tradeoff_selection
     check: role_required
     acceptable_roles: [system-of-record]
-    acceptable_components: [postgresql-16, mysql-8]
+    acceptable_components: [postgresql-16, mysql-8, mongodb-7]
   - id: g2
     dimension: tradeoff_selection
     check: role_forbidden
@@ -79,17 +83,37 @@ gold:
     check: slot_match
     flow: delivery
     slot: transport
-    acceptable: [websocket-push, server-sent-events]
+    acceptable: [websocket-push, server-sent-events, long-polling]
   - id: g5
     dimension: requirements_coverage
     check: coverage
-    requirement: R2
-    acceptable: [inverted-index, secondary-indexes]
+    requirement: R1
+    acceptable: [write-ahead-log]
   - id: g6
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [inverted-index]
+  - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [websocket-push, server-sent-events, long-polling]
+  - id: g8
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
+    acceptable: [postgresql-16, mysql-8, mongodb-7]
+  - id: g9
     dimension: operability
     check: pattern_forbidden
-    forbidden: [sharding, cqrs, event-sourcing, autoscaling]
-  - id: g7
+    forbidden: [sharding, autoscaling]
+  - id: g10
+    dimension: operability
+    check: role_forbidden
+    role: message-queue
+    forbidden_components: [kafka, rabbitmq, sqs]
+  - id: g11
     dimension: parsimony
     check: parsimony
     max_patterns: 5
@@ -105,8 +129,8 @@ traps:
     why_attractive: It simplifies the hot path and at this scale everything feels fast. But C3 says accepted messages are never lost — the durable write must precede the delivery ack, and at 50/s the cost of doing it right is negligible.
   - id: T3
     description: A dedicated search cluster for full-text search.
-    violated_constraint_id: C1
-    why_attractive: '"Full-text search" pattern-matches to a search engine deployment. But 40 GB of text is comfortably inside a relational database''s built-in full-text indexing, and a separate cluster doubles the operational surface for the 2-person team.'
+    violated_constraint_id: C2
+    why_attractive: '"Full-text search" pattern-matches to a search engine deployment. But the 40 GB corpus fits the built-in text index of any accepted primary, and a separate cluster doubles the operational surface for the 2-person team.'
 
 twist:
   description: >
@@ -115,31 +139,34 @@ twist:
     problem NUMBERS.
   invalidated_canonical: >
     The published big-chat reference stack (broker fan-out, wide-column
-    storage, sharding, CQRS read models) fails g2/g6/g7 here: at 50
+    storage, and sharding) fails g2/g9/g10/g11 here: at 50
     messages/second with a 2-person operations team, one relational primary
-    with built-in full-text search and a WebSocket tier is the entailed
+    or document primary with built-in full-text search and a simple delivery
+    tier is the entailed
     architecture, and each additional moving part is a scored violation.
-  twist_gold_refs: [g2, g6]
+  twist_gold_refs: [g2, g9, g10]
 
 gold_rationale: |
-  Capacity math (g1, g2, g6, g7): 50 messages/second is ~0.5% of a single
-  relational primary's comfortable transactional write capacity; 40 GB over
-  five years fits in RAM on a modest VM. Nothing in the numbers creates a
-  second scaling problem, so every scale structure (sharding, brokers as
-  message backbone, CQRS, autoscaling on two fixed VMs) adds operational
-  surface (C2's explicit requirement) with zero capacity need. The failure
-  mode being designed against is stated in context: unattended complexity.
+  Capacity and operability (g1, g2, g8-g11): 50 messages/second and 40 GB over
+  five years fit one general-purpose ACID primary on the stated VMs. The prompt
+  explicitly makes PostgreSQL, MySQL, and MongoDB supportable, so the benchmark
+  does not over-prescribe a relational model where none is required. Nothing
+  creates a second scaling problem: sharding, a separate message broker, or
+  autoscaling on two fixed VMs adds operational surface (C2) with no capacity
+  need. The failure mode being designed against is unattended complexity, not
+  a particular database brand.
 
-  Durability (g3, T2): C3 requires accepted-means-durable; the write to the
-  primary precedes the ack, then fan-out to connected clients. At 50/s this
-  costs single-digit milliseconds — there is no throughput pressure to trade
-  against, so best-effort is a pure violation.
+  Durability (g3, g5, T2): C3 requires accepted-means-durable; a write-ahead
+  log commit to the primary precedes the acknowledgement, then fan-out to
+  connected clients. At 50/s there is no throughput pressure to trade against,
+  so best-effort acknowledgement is a pure violation.
 
-  Search (g5, T3): built-in full-text indexing (e.g. the relational engine's
-  native FTS) over 40 GB satisfies R2 with one system; a separate search
-  cluster doubles what the 2-person team operates (C2) for capacity nobody
-  needs (C1).
+  Search (g6, T3): the accepted primary's built-in inverted full-text index
+  over 40 GB satisfies R2 with one system; a separate search cluster doubles
+  what the 2-person team operates for no required capability.
 
-  Transport (g4): WebSocket push (or SSE with a small write channel) serves
-  1,200 concurrent connections from one VM; exotic transports solve latency
-  problems this scale does not have.
+  Transport and presence (g4, g7): WebSocket push, SSE plus an HTTP write
+  channel, and held-request long polling can all deliver an event immediately
+  at 1,200 clients. The same channel carries presence changes, so all three are
+  accepted; custom UDP reliability adds implementation burden without a stated
+  latency or head-of-line requirement.
