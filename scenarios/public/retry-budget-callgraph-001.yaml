@@ -1,0 +1,176 @@
+# Four locally reasonable retry policies multiply into 81 leaf calls. A single
+# retry owner, propagated absolute deadline, circuit breaking, and admission
+# control are entailed by the request and concurrency arithmetic.
+instance_id: retry-budget-callgraph-001
+domain: service-callgraph-resilience
+difficulty: hard
+version: "0.3.0"
+split: public
+
+problem_statement: |
+  A read-only product-plan request traverses four nested calling layers before
+  reaching an inventory leaf. Each layer currently performs up to three total
+  downstream attempts (the first attempt plus two retries). Therefore one edge
+  request can produce 3 x 3 x 3 x 3 = 81 inventory calls when timeouts align.
+
+  Edge traffic is 400 requests/second. The end-to-end deadline is a hard 800 ms,
+  but each layer currently starts a fresh 500 ms timeout. Inventory normally
+  responds within 60 ms; during overload it takes 350-500 ms and begins timing
+  out. Its tested safe limit is 2,000 concurrent calls; above that, latency and
+  errors climb monotonically. Queued work that cannot begin before its caller's
+  deadline has no value.
+
+  Calls are idempotent reads. The business permits one retry for a transient
+  failure, but at most one retry across the entire logical request. When
+  inventory is persistently unhealthy, returning a partial response or 503
+  inside 800 ms is preferable to waiting. Design deadline propagation, retry
+  ownership/budgeting, and overload behavior.
+
+context: |
+  The edge can attach an absolute deadline and a retry-budget header. Every
+  service can cap its local timeout to remaining time and is able to disable
+  automatic client-library retries. Admission control sees current inventory
+  concurrency. A circuit breaker can share health state across callers.
+
+constraints:
+  - id: C1
+    type: latency
+    value: "hard 800 ms end-to-end deadline; work that cannot start before the remaining deadline must not be queued"
+  - id: C2
+    type: throughput
+    value: "400 edge requests/second; inventory safe limit is 2,000 concurrent calls and overload worsens monotonically above it"
+  - id: C3
+    type: other
+    value: "at most one retry across the whole logical request, although four layers currently make three attempts each"
+  - id: C4
+    type: availability
+    value: "during persistent inventory failure, partial response or 503 within deadline is preferable to waiting for success"
+
+requirements:
+  - id: R1
+    text: Permit one transient retry without multiplicative retry amplification across layers.
+  - id: R2
+    text: Fail fast inside the propagated 800 ms deadline when inventory remains unhealthy.
+  - id: R3
+    text: Reject or degrade new work before inventory exceeds 2,000 concurrent calls.
+
+flows:
+  - id: request_budget
+    description: Deadline semantics applied at every hop.
+    decision_slots:
+      deadline:
+        - propagate-absolute-800ms-deadline-and-cap-each-hop-to-remaining-time
+        - reset-a-fresh-500ms-timeout-at-each-layer
+        - allocate-500ms-to-every-layer-and-let-edge-cancel-late-work
+  - id: retry_control
+    description: Ownership and consumption of retry attempts across the call graph.
+    decision_slots:
+      policy:
+        - edge-owns-one-shared-retry-token-and-all-downstream-layers-make-one-attempt
+        - every-layer-keeps-three-total-attempts-with-backoff
+        - each-layer-may-retry-once-if-its-local-timeout-allows
+  - id: overload
+    description: Behavior as inventory latency/error signals rise toward saturation.
+    decision_slots:
+      posture:
+        - open-circuit-on-persistent-failure-and-shed-or-degrade-before-2000-inflight
+        - queue-all-requests-and-retry-until-inventory-recovers
+        - wait-for-autoscaling-after-concurrency-exceeds-2000
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: request_budget
+    slot: deadline
+    acceptable: [propagate-absolute-800ms-deadline-and-cap-each-hop-to-remaining-time]
+  - id: g2
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: retry_control
+    slot: policy
+    acceptable: [edge-owns-one-shared-retry-token-and-all-downstream-layers-make-one-attempt]
+  - id: g3
+    dimension: operability
+    check: slot_match
+    flow: overload
+    slot: posture
+    acceptable: [open-circuit-on-persistent-failure-and-shed-or-degrade-before-2000-inflight]
+  - id: g4
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [retries-with-backoff]
+  - id: g5
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [circuit-breaker]
+  - id: g6
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [load-shedding, admission-control]
+  - id: g7
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 6
+
+traps:
+  - id: T1
+    description: Keep exponential backoff and jitter at every layer; bounded local retries are standard resilience practice.
+    violated_constraint_id: C3
+    why_attractive: Every individual client has a reasonable cap of three attempts, and jitter prevents exact synchronization. Nesting multiplies the caps to 81 leaf calls per logical request; backoff spreads the amplification in time but does not satisfy the one-retry global budget.
+  - id: T2
+    description: Give every hop a 500 ms timeout because inventory's degraded responses can still finish within 500 ms.
+    violated_constraint_id: C1
+    why_attractive: The timeout matches the leaf's observed degraded tail and seems conservative. Four freshly reset hop timers can keep descendants running long after the edge's 800 ms deadline; cancellation races also waste capacity on responses that can no longer be returned.
+  - id: T3
+    description: Queue overload and autoscale inventory rather than reject useful customer reads.
+    violated_constraint_id: C2
+    why_attractive: Queues and autoscaling normally absorb bursts without user-visible errors. Here overload gets slower above 2,000 concurrent calls and expired queued reads have zero value, so a queue increases concurrency duration and feeds the timeout/retry loop instead of draining it.
+
+twist:
+  description: >
+    Four textbook local retry policies compose into a global retry storm; the
+    unit of resilience is the whole request graph, not an individual RPC client.
+  invalidated_canonical: >
+    "Add retries with exponential backoff at each dependency" fails g1-g3. The
+    design must propagate one absolute deadline, designate one retry owner with a
+    single shared token, disable nested retries, open the circuit on persistent
+    failure, and shed before the measured concurrency knee.
+  twist_gold_refs: [g1, g2, g3]
+
+gold_rationale: |
+  Amplification (g2, g4, T1): four layers with three total attempts yield
+  3^4=81 inventory calls per edge request. At 400 requests/second that is
+  32,400 leaf calls/second. If each occupies the stated 500 ms timeout window,
+  expected inventory concurrency is 32,400 x 0.5 = 16,200—8.1 times the safe
+  limit of 2,000. Backoff and jitter alter arrival shape, not the 81-call bound.
+
+  A retry-budget header initialized to one makes the edge the sole retry owner.
+  Every downstream layer performs exactly one attempt and propagates the same
+  budget without consuming it. The first edge attempt creates one leaf call;
+  the optional retry creates one more, so the global maximum is two rather than
+  81. At 400 requests/second and 500 ms worst-case leaf occupancy, even the
+  pessimistic two-call bound is 400 x 2 x 0.5 = 400 concurrent calls, below the
+  2,000 limit before unrelated traffic. Backoff/jitter still governs that one
+  permitted retry, which is why retries-with-backoff covers R1.
+
+  Deadline composition (g1, T2): the edge computes an absolute expiry 800 ms
+  from admission. Each hop forwards that same timestamp and caps connect,
+  request, and retry waits to remaining time; it does not reset 500 ms. A late
+  request is rejected before starting downstream work. Thus cancellation is a
+  capacity mechanism as well as a response-time mechanism.
+
+  Persistent failure (g3, g5, g6, T3): a circuit breaker stops spending the
+  shared budget on a dependency already known to be failing. Admission control
+  or load shedding rejects/degrades before measured concurrency reaches 2,000.
+  C4 explicitly permits partial/503 responses, while C1 makes an expired queue
+  entry worthless. Queuing until recovery and post-saturation autoscaling both
+  enter the positive loop: latency -> timeout -> retry -> more concurrency ->
+  more latency.

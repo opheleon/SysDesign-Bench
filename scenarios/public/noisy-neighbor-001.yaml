@@ -1,0 +1,179 @@
+# Multi-tenant SLO problem where autoscaling fails for a NEW reason (not
+# budget): shared-queue head-of-line contention survives added capacity. The
+# entailed answer is isolation — bulkheads, per-tenant admission — not more
+# machines. The scenario states that autoscaling was already tried.
+instance_id: noisy-neighbor-001
+domain: saas-platform
+difficulty: hard
+version: "0.2.0"
+split: public
+
+problem_statement: |
+  A B2B document-processing SaaS serves 400 tenants through a shared API
+  and a shared worker fleet. Contracts promise EVERY tenant p99 API
+  latency <= 200 ms and job-start latency <= 30 s, individually measured.
+
+  The problem tenant: one enterprise customer legitimately submits batch
+  workloads 100x the median tenant — bursts of 50,000 jobs in minutes,
+  contractually allowed and highly profitable. During these bursts, small
+  tenants' jobs queue behind the batch and their SLOs blow out (job-start
+  p99 hits 20+ minutes), triggering SLA credits across dozens of accounts.
+
+  What has been tried: the platform team doubled, then quadrupled,
+  worker-fleet autoscaling limits. Measured result across three burst
+  events: scale-up added throughput, the big tenant's backlog drained
+  faster, and small tenants' job-start p99 improved only marginally
+  (22 min -> 14 min) — still 28x over SLO — because arrivals during
+  scale-up kept landing behind the batch in the shared queues. Doubling
+  again was modeled: cost +$85k/month, projected small-tenant p99 still
+  over 5 minutes. Finance has frozen further capacity increases.
+
+  Design the multi-tenancy layer that meets per-tenant SLOs.
+
+context: |
+  Jobs are independent (no cross-tenant ordering). The big tenant's
+  contract guarantees THROUGHPUT over a window (all 50k jobs within 4
+  hours), not job-start latency — its own SLO terms differ from the
+  standard tier. Worker capacity comfortably exceeds the sum of all
+  tenants' sustained rates; only burst contention causes violations.
+
+constraints:
+  - id: C1
+    type: latency
+    value: "per-tenant SLOs measured individually: API p99 <= 200 ms, job-start p99 <= 30 s for standard-tier tenants"
+  - id: C2
+    type: scale
+    value: "one tenant legitimately bursts 100x median (50k jobs in minutes); its contract guarantees 4-hour window throughput, not job-start latency"
+  - id: C3
+    type: budget
+    value: "capacity is frozen: autoscaling was quadrupled across three burst events and small-tenant p99 remained 28x over SLO; further scale-up is modeled ineffective and is not fundable"
+  - id: C4
+    type: availability
+    value: "the big tenant's throughput contract must still be met — throttling it below its 4-hour window is a breach in the other direction"
+
+requirements:
+  - id: R1
+    text: Standard-tier tenants meet their SLOs during the big tenant's bursts.
+  - id: R2
+    text: The big tenant's 4-hour window throughput contract is met.
+  - id: R3
+    text: The mechanism works within frozen capacity.
+  - id: R4
+    text: New tenants onboard without per-tenant capacity planning.
+    implicit: true
+
+flows:
+  - id: contention
+    description: How the burst tenant and standard tenants share the worker fleet.
+    decision_slots:
+      mechanism: [per-tenant-isolation-with-weighted-scheduling, shared-queue-scale-on-demand, dedicated-fleet-per-tenant]
+  - id: admission
+    description: Where burst traffic is shaped.
+    decision_slots:
+      point: [admission-control-at-intake-per-tenant, no-shaping-absorb-in-queue]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: contention
+    slot: mechanism
+    acceptable: [per-tenant-isolation-with-weighted-scheduling]
+  - id: g2
+    dimension: operability
+    check: pattern_required
+    acceptable: [bulkhead]
+  - id: g3
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: admission
+    slot: point
+    acceptable: [admission-control-at-intake-per-tenant]
+  - id: g4
+    dimension: operability
+    check: pattern_required
+    acceptable: [admission-control, rate-limiting]
+  - id: g5
+    dimension: operability
+    check: pattern_required
+    acceptable: [priority-queues]
+  - id: g6
+    dimension: tradeoff_selection
+    check: pattern_forbidden
+    forbidden: [autoscaling]
+  - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [bulkhead, priority-queues]
+  - id: g8
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [priority-queues, queue-load-leveling, scheduled-pre-provisioning]
+  - id: g9
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 8
+
+traps:
+  - id: T1
+    description: More capacity — raise autoscaling limits again, add a burst pool, or "right-size the fleet for peaks".
+    violated_constraint_id: C3
+    why_attractive: "Adding capacity is the universal first answer to latency-under-load, and it DID drain backlogs faster. But the scenario states the measured result of trying it three times: shared-queue head-of-line contention means new arrivals still land behind the 50k-job batch, small-tenant p99 stayed 28x over SLO, and further increases are modeled ineffective AND frozen. This is queueing structure, not capacity."
+  - id: T2
+    description: Throttle the big tenant's bursts down to a rate that keeps shared queues shallow.
+    violated_constraint_id: C4
+    why_attractive: Shaping the offender is the intuitive mirror of protecting the victims. But the big tenant's contract guarantees 4-hour window throughput — throttling below 50k/4h substitutes one SLA breach for dozens. The entailed shape lets it consume ALL idle capacity (weighted scheduling), just never at standard tenants' expense.
+  - id: T3
+    description: Dedicated worker fleets per tenant tier (or per large tenant).
+    violated_constraint_id: C3
+    why_attractive: Physical separation trivially solves contention and is easy to reason about. But static partitions waste the frozen capacity (idle small-tenant reserve during quiet hours, starved batch fleet during bursts) — the sum-of-sustained-rates fact in context means shared capacity with SCHEDULED isolation meets both contracts; hard partitioning needs the budget increase that is frozen.
+
+twist:
+  description: >
+    A spiky-load scenario where "just autoscale" has ALREADY been tried,
+    measured, and falsified in the problem statement itself — the failure
+    is head-of-line queueing structure, which added capacity provably did
+    not fix — and where throttling the noisy tenant breaches the other
+    contract.
+  invalidated_canonical: >
+    Two canons fail: "scale out to absorb load" fails g1/g6/T1 against the
+    stated measurements (quadrupled capacity, 28x over SLO, finance
+    freeze), and "rate-limit the abuser" fails T2 against the big tenant's
+    throughput contract. The entailed design is scheduling, not sizing:
+    per-tenant bulkheaded queues, weighted fair scheduling that gives the
+    batch tenant all idle capacity but guarantees standard tenants their
+    SLO share, and per-tenant admission at intake.
+  twist_gold_refs: [g1, g6]
+
+gold_rationale: |
+  Why capacity cannot fix it (g1, g6, T1): with a shared FIFO queue, a
+  50,000-job batch ahead of a small tenant's job means the small tenant
+  waits for the backlog to drain regardless of drain RATE — arrivals
+  during scale-up keep landing behind the batch (the stated measurement:
+  4x capacity moved p99 from 22 to 14 minutes vs a 30-second SLO). The
+  violation is a property of queue STRUCTURE (head-of-line blocking
+  across tenants), so the fix is structural: per-tenant queues (bulkhead)
+  with a weighted fair scheduler across them.
+
+  Meeting both contracts on frozen capacity (g2, g5, g7, g8, T2, T3):
+  context states worker capacity exceeds the sum of sustained rates —
+  contention is transient and structural. Weighted fair scheduling
+  guarantees each standard tenant enough service share to hold job-start
+  p99 <= 30 s (their queues are shallow by definition of 1x-median load),
+  while the batch tenant receives ALL remaining capacity — which across a
+  4-hour window comfortably clears 50k jobs (R2) because standard-tier
+  sustained demand is a small fraction of the fleet. Throttling the batch
+  (T2) breaches C4 for no scheduling gain; dedicated fleets (T3) turn
+  statistical multiplexing off and need capacity that is frozen.
+
+  Admission placement (g3, g4): shaping happens at intake per tenant —
+  the batch is accepted (its contract says so) into ITS OWN queue with
+  backpressure to the submitting client, never absorbed into a shared
+  queue where it becomes other tenants' latency. Per-tenant admission
+  also gives R4: onboarding sets a weight, not a capacity plan.

@@ -1,0 +1,199 @@
+# An audit report must represent one causally possible global state. Wall-clock
+# predicates and simultaneous RPCs can include an effect without its cause;
+# propagated barriers and recorded stream offsets close a logical cut.
+instance_id: causal-audit-snapshot-001
+domain: distributed-audit-reporting
+difficulty: hard
+version: "0.3.0"
+split: public
+
+problem_statement: |
+  An order workflow spans three independently stored services:
+
+  Orders commits an order and an outbox event. Billing consumes that event,
+  commits a charge and its outbox event. Fulfillment consumes the billing event
+  and commits a reservation. Kafka preserves order within each partition, but
+  messages may be delayed in brokers or outboxes. Each service has multiple
+  input partitions and its own database clock; observed clock skew is up to 8
+  seconds.
+
+  Compliance needs an exact audit report that corresponds to one possible
+  global state. The causal invariants are strict: a reported charge must include
+  its causing order, and a reported reservation must include both its charge and
+  order. The report need not represent one wall-clock instant, but the same run
+  must be reproducible from recorded evidence. Writes continue at 50,000
+  events/second; globally pausing services or opening a transaction across their
+  databases is not allowed.
+
+  Kafka supports barrier records. A consumer can stop a partition when its
+  barrier arrives, wait until barriers have arrived on all of its inputs, commit
+  a local MVCC snapshot marker with consumed offsets, emit downstream barriers
+  after all pre-barrier outbox records, and then release post-barrier records.
+  Design how an audit cut is initiated, captured at each service, propagated,
+  and assembled.
+
+context: |
+  Service state changes and consumed offsets commit atomically in each local
+  database. Outbox relays preserve transaction order into the corresponding
+  Kafka partition. Historical row versions and audit-run snapshot markers are
+  retained for 30 days. A concrete clock-skew example is possible: an order
+  committed first can store 12:00:07 while its later charge stores 11:59:56.
+
+constraints:
+  - id: C1
+    type: consistency
+    value: "the report is a causally consistent cut: it never includes a charge without its order or a reservation without its charge and order"
+  - id: C2
+    type: availability
+    value: "50,000 events/second continue; no global write pause and no cross-service database transaction"
+  - id: C3
+    type: other
+    value: "database clocks may skew by 8 seconds and messages/outbox records may be in flight for an unbounded operational delay"
+  - id: C4
+    type: compliance
+    value: "an audit run is reproducible for 30 days from persisted snapshot markers, historical versions, and exact stream offsets"
+
+requirements:
+  - id: R1
+    text: Capture one causally closed global state while messages are in flight.
+  - id: R2
+    text: Preserve transaction-to-event ordering so each downstream barrier follows all pre-cut causal events.
+  - id: R3
+    text: Reproduce the report from durable local snapshot markers and recorded offsets.
+
+flows:
+  - id: cut_frontier
+    description: The coordinate used to define the audit boundary across services.
+    decision_slots:
+      mechanism:
+        - inject-and-propagate-partition-barriers-with-recorded-stream-offsets
+        - choose-one-wall-clock-timestamp-and-filter-updated-at
+        - send-simultaneous-snapshot-rpcs-to-every-service
+  - id: participant_capture
+    description: Consumer behavior when barriers reach different input partitions at different times.
+    decision_slots:
+      boundary:
+        - hold-post-barrier-records-wait-for-all-input-barriers-then-record-local-snapshot
+        - snapshot-on-the-first-input-barrier-and-continue-other-partitions
+        - continue-all-partitions-and-snapshot-after-a-fixed-delay
+  - id: barrier_propagation
+    description: Ordering of a service's downstream barrier relative to its output events.
+    decision_slots:
+      ordering:
+        - flush-all-precut-outbox-events-emit-barrier-then-release-postcut-work
+        - emit-barrier-immediately-then-drain-the-outbox
+        - coordinator-writes-independent-barriers-directly-to-every-service-input
+  - id: report_assembly
+    description: Source used to materialize a completed audit run.
+    decision_slots:
+      source:
+        - persisted-local-snapshots-and-their-exact-consumed-produced-offsets
+        - latest-live-service-rows-when-the-report-query-starts
+        - rows-whose-updated-at-is-before-the-coordinator-time
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: cut_frontier
+    slot: mechanism
+    acceptable: [inject-and-propagate-partition-barriers-with-recorded-stream-offsets]
+  - id: g2
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: participant_capture
+    slot: boundary
+    acceptable: [hold-post-barrier-records-wait-for-all-input-barriers-then-record-local-snapshot]
+  - id: g3
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: barrier_propagation
+    slot: ordering
+    acceptable: [flush-all-precut-outbox-events-emit-barrier-then-release-postcut-work]
+  - id: g4
+    dimension: operability
+    check: slot_match
+    flow: report_assembly
+    slot: source
+    acceptable: [persisted-local-snapshots-and-their-exact-consumed-produced-offsets]
+  - id: g5
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [consistent-cut-snapshot]
+  - id: g6
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [outbox]
+  - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [temporal-audit-log]
+  - id: g8
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 6
+
+traps:
+  - id: T1
+    description: Query every database for rows with updated_at <= one coordinator timestamp.
+    violated_constraint_id: C3
+    why_attractive: An as-of timestamp is the normal reporting interface and looks like a precise shared boundary. With independent clocks, the earlier order can be stamped 12:00:07 while its later charge is stamped 11:59:56, so a noon predicate includes the effect and excludes its cause.
+  - id: T2
+    description: Send snapshot RPCs to all services concurrently and treat their responses as one instant.
+    violated_constraint_id: C1
+    why_attractive: Concurrent requests seem to reduce skew without requiring clock synchronization. Orders can answer before committing an order, then Billing can consume that order and answer after committing its charge; the merged result contains the charge but not the order and describes no reachable global state.
+  - id: T3
+    description: Let a service snapshot as soon as the first partition barrier arrives while other partitions continue processing.
+    violated_constraint_id: C1
+    why_attractive: Waiting for every partition creates head-of-line blocking, so first-barrier capture appears more available. It permits post-cut work from a fast partition into the local snapshot while a slow partition's pre-cut causes remain outside it, opening the cut across a causal edge.
+
+twist:
+  description: >
+    A reporting problem where temporal precision is logical rather than
+    wall-clock: simultaneous reads and timestamps can construct a state that
+    never existed, while ordered barriers close every causal channel.
+  invalidated_canonical: >
+    "Run parallel as-of queries at timestamp T" fails g1-g4. The report needs a
+    propagated barrier frontier, per-partition holds until all local inputs close,
+    downstream barriers ordered after pre-cut outbox events, and durable local
+    snapshot/offset evidence for later assembly.
+  twist_gold_refs: [g1, g2, g3, g4]
+
+gold_rationale: |
+  Timestamp counterexample (T1): let the order commit first in real time, but its
+  +7-second clock stores updated_at=12:00:07. Billing later consumes the event,
+  but its -6-second clock stores the charge at 11:59:56. A query at T=12:00:00
+  includes the charge and excludes the order, violating C1 despite using exact
+  local predicates. An 8-second wait does not solve unbounded message delay, and
+  simultaneous RPCs have the analogous read-order race in T2.
+
+  Barrier cut (g1, g2, g5): the coordinator inserts an audit-run barrier at a
+  recorded offset in every root partition. When a participant sees a barrier on
+  one input, it holds records after that barrier on that partition. It continues
+  only the other inputs until each has reached its barrier, then records one
+  local MVCC/history frontier and the exact consumed offsets before releasing
+  post-barrier work. Holding fast inputs is essential: otherwise their post-cut
+  effects can enter the snapshot before a slow input's pre-cut causes.
+
+  Causal propagation (g3, g6): the transactional outbox orders state changes and
+  their events. A service drains every event caused by pre-barrier inputs, emits
+  its downstream barrier after those events, and only then releases post-barrier
+  processing. Consequently, if a downstream snapshot contains a charge, the
+  Orders barrier could not have passed without the causing order being inside
+  the upstream cut; the same induction covers reservations. Emitting the barrier
+  before draining the outbox would let the marker overtake its cause.
+
+  Reproduction and availability (g4, g7): report assembly reads historical row
+  versions at each persisted local marker and verifies the recorded consumed and
+  produced offsets. It never consults mutable "latest" rows. Only individual
+  stream partitions pause briefly at their barrier; request writes and unrelated
+  partitions continue, satisfying C2 without 2PC or a global stop. Retaining the
+  markers, offset evidence, and temporal versions for 30 days makes the same run
+  reproducible under C4.

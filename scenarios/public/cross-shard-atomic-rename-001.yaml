@@ -1,0 +1,209 @@
+# A deliberate inversion of the "avoid 2PC" heuristic. The contract requires
+# non-compensable atomic visibility, while the workload and availability policy
+# explicitly make blocking durable 2PC affordable.
+instance_id: cross-shard-atomic-rename-001
+domain: distributed-filesystem-metadata
+difficulty: hard
+version: "0.3.0"
+split: public
+
+problem_statement: |
+  A multi-tenant filesystem shards metadata by parent-directory id. Renaming a
+  file across directories can therefore involve four independently replicated
+  metadata participants: the source directory entry, destination directory
+  entry, source quota ledger, and destination quota ledger.
+
+  The public contract for `rename(request_id, source, destination)` is the POSIX
+  atomicity property: readers may observe the complete state before the rename
+  or the complete state after it, never a state with both names, neither name,
+  or quota moved without the directory entry. Once success is acknowledged,
+  the rename survives any coordinator or participant crash. A retried
+  `request_id` must return the original outcome without applying either quota
+  delta again.
+
+  Cross-shard renames are modest: at most 50/second, with at most four
+  participants each. Every participant and the coordinator can sustain 2,000
+  fsync-backed metadata WAL records/second. All are in one metro region: p99
+  request/response RTT is 2 ms and a p99 WAL fsync is 4 ms. The p99 rename
+  budget is 120 ms in healthy operation.
+
+  During a partition, availability is not required: a rename may block or
+  return retryable-unavailable for up to the 30-second coordinator recovery
+  objective. Existing reads of unrelated metadata must continue. Sagas and
+  compensations are permitted as candidate designs, but a compensating rename
+  does not erase a partial state already observed by another client.
+
+  Design the transaction, participant vote rule, crash recovery, and retry
+  behavior. State exactly what is durable before a participant votes yes and
+  how an in-doubt participant learns the final decision.
+
+context: |
+  Directory and quota shards already provide linearizable local transactions.
+  Prepared records may retain locks on only the affected names and quota rows;
+  unrelated keys remain available. A stable request id is supplied by the
+  client. There is no requirement to make progress while a participant or the
+  transaction coordinator is unreachable.
+
+constraints:
+  - id: C1
+    type: consistency
+    value: "cross-directory rename plus both quota deltas is one atomic, linearizable all-or-nothing operation; no client-visible partial state is permitted"
+  - id: C2
+    type: durability
+    value: "an acknowledged outcome survives coordinator and participant crashes; an in-doubt participant must not invent or forget the decision"
+  - id: C3
+    type: latency
+    value: "healthy-operation rename p99 <= 120 ms; at most 50 renames/s, four participants, 2 ms p99 RTT, 4 ms p99 WAL fsync, 2,000 WAL records/s capacity per node"
+  - id: C4
+    type: availability
+    value: "rename availability during a partition is not required; affected rows may block for up to the 30-second recovery objective, while unrelated metadata remains available"
+  - id: C5
+    type: consistency
+    value: "retries carrying the same request_id return the original outcome and never apply quota deltas twice"
+
+requirements:
+  - id: R1
+    text: Atomically commit or abort every participant in a cross-shard rename without exposing a compensatable intermediate state.
+  - id: R2
+    text: Persist participant prepare state and the coordinator's final decision before acknowledging actions that recovery must reproduce.
+  - id: R3
+    text: Deduplicate retries by stable request_id and redrive the recorded outcome idempotently after crashes.
+
+flows:
+  - id: rename_transaction
+    description: Cross-shard protocol and the durable condition for a yes vote.
+    decision_slots:
+      protocol: [durable-two-phase-commit, saga-with-compensation, sequential-best-effort-updates]
+      yes_vote_rule: [wal-prepare-and-locks-before-yes, keep-prepare-in-memory, apply-visible-change-before-yes]
+  - id: in_doubt_recovery
+    description: What a participant does after voting yes and losing contact with the coordinator.
+    decision_slots:
+      participant_policy: [retain-prepared-state-and-query-recorded-decision, unilateral-timeout-abort, unilateral-timeout-commit]
+      coordinator_policy: [fsync-decision-before-commit-messages-and-redrive, broadcast-then-record-decision, reconstruct-decision-from-participant-majority]
+  - id: request_retry
+    description: Handling of a repeated stable request_id.
+    decision_slots:
+      behavior: [return-and-redrive-durable-original-outcome, start-new-transaction, reject-all-retries]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: rename_transaction
+    slot: protocol
+    acceptable: [durable-two-phase-commit]
+  - id: g2
+    dimension: migration_safety
+    check: slot_match
+    flow: rename_transaction
+    slot: yes_vote_rule
+    acceptable: [wal-prepare-and-locks-before-yes]
+  - id: g3
+    dimension: operability
+    check: slot_match
+    flow: in_doubt_recovery
+    slot: participant_policy
+    acceptable: [retain-prepared-state-and-query-recorded-decision]
+  - id: g4
+    dimension: operability
+    check: slot_match
+    flow: in_doubt_recovery
+    slot: coordinator_policy
+    acceptable: [fsync-decision-before-commit-messages-and-redrive]
+  - id: g5
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: request_retry
+    slot: behavior
+    acceptable: [return-and-redrive-durable-original-outcome]
+  - id: g6
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [two-phase-commit]
+  - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [write-ahead-log]
+  - id: g8
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [idempotency-keys, exactly-once-processing]
+  - id: g9
+    dimension: tradeoff_selection
+    check: pattern_forbidden
+    forbidden: [saga]
+  - id: g10
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 6
+
+traps:
+  - id: T1
+    description: >
+      Use a saga: remove the source, add the destination, update quotas, and compensate backward if a later step fails.
+    violated_constraint_id: C1
+    why_attractive: >
+      Sagas are the standard recommendation for cross-service work and avoid blocking on a coordinator. Here compensation cannot un-observe a state: a reader can see neither name after source removal or a destination without its quota before the later step. That is a direct contract violation even if compensation eventually succeeds.
+  - id: T2
+    description: Hold a distributed lease, perform the four local writes sequentially, and rely on the lease to prevent competing renames.
+    violated_constraint_id: C2
+    why_attractive: Mutual exclusion appears to turn the operation into one critical section. A crash after two writes leaves durable partial state, and lease expiry lets another owner proceed without knowing the first outcome. A lock is not an atomic commit record.
+  - id: T3
+    description: Reject 2PC categorically because it can block, and choose an available eventually consistent protocol.
+    violated_constraint_id: C4
+    why_attractive: The usual distributed-systems warning is correct when partition availability is required. C4 explicitly permits affected operations to block during the 30-second recovery window, while C1 forbids the partial visibility of the nonblocking alternatives. In this workload, blocking is the priced-in tradeoff.
+
+twist:
+  description: >
+    The benchmark deliberately supplies the assumptions under which much-maligned
+    2PC is the correct mechanism: strict non-compensable atomicity, low volume,
+    ample latency headroom, local participants, and no partition-progress goal.
+  invalidated_canonical: >
+    "Never use 2PC; use a saga" fails g1, g6, and g9. The saga's availability
+    advantage is not requested, while its observable intermediate states are
+    explicitly forbidden. Durable prepare and decision WAL make 2PC's uncertain
+    states recoverable under the allowed blocking window.
+  twist_gold_refs: [g1, g6, g9]
+
+gold_rationale: |
+  Protocol choice (g1, g6, g9, T1): C1 requires one decision shared by up to
+  four independently transactional shards. Sequential updates expose partial
+  state; a saga exposes it and later compensates it. Neither satisfies atomic
+  visibility. Durable 2PC first obtains prepared yes votes from every
+  participant, then records exactly one commit/abort decision and releases all
+  participants to expose that decision. Its known blocking failure mode is
+  permitted by C4, so rejecting it by slogan answers a different problem.
+
+  Healthy-path arithmetic (C3): all participants act in parallel, so four
+  participants do not multiply critical-path latency. A conservative path is:
+  coordinator intent fsync 4 ms + prepare round trip and participant fsync
+  (2+4=6 ms) + coordinator decision fsync 4 ms + terminal round trip and
+  participant fsync (2+4=6 ms) = 20 ms. Even reserving 40 ms for lock acquisition,
+  scheduling, and application work gives 60 ms, half the 120 ms budget. At
+  50 transactions/s, each involved participant appends at most a prepare and a
+  terminal record per transaction: 100 WAL records/s, 5% of its 2,000/s
+  capacity. The coordinator likewise writes at most about 100/s. Thus the
+  blocking/overhead objection is not supported by this workload.
+
+  Durable state machine (g2-g4, g7, T2): before voting yes, a participant fsyncs
+  the transaction id, request id, proposed mutations, and retained row locks in
+  its WAL. It may not expose the mutation yet. The coordinator fsyncs its final
+  decision before sending commit messages. After a crash, an in-doubt
+  participant retains its prepared state and queries that durable decision; it
+  never chooses commit or abort by local timeout. The coordinator redrives the
+  recorded decision until every participant acknowledges it. This converts a
+  crash into allowed blocking, not split outcomes.
+
+  Retry safety (g5, g8): the stable request_id indexes the durable transaction
+  outcome. A retry returns the same commit/abort and redrives missing terminal
+  messages idempotently. Starting a fresh transaction could apply both quota
+  deltas twice after a lost response; rejecting every retry would leave the
+  client unable to learn an already committed result.
+

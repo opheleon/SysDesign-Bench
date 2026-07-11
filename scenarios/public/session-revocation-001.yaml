@@ -28,8 +28,9 @@ problem_statement: |
     revoke up to 5,000,000 sessions at once, and such events have occurred
     on consecutive days.
   - Each gateway can dedicate at most 400 MB of memory to revocation data.
-    A revocation entry costs ~64 bytes. The internal event feed that could
-    carry revocations to gateways delivers with p99 5 seconds.
+  A revocation entry costs ~64 bytes. The internal event feed that could
+  carry revocations to gateways delivers with p99 5 seconds and a contracted
+  hard maximum of 45 seconds while its 5-second heartbeat remains healthy.
 
   Redesign session validation to meet the 60-second revocation mandate.
 
@@ -50,7 +51,7 @@ constraints:
     value: "central auth service sustains <= 5,000 issuance/refresh requests/second"
   - id: C4
     type: scale
-    value: "2M concurrent sessions; mass revocations up to 5M at once, possibly on consecutive days; gateway revocation memory <= 400 MB at ~64 bytes/entry; feed delivery p99 5s"
+    value: "2M concurrent sessions; mass revocations up to 5M at once, possibly on consecutive days; gateway revocation memory <= 400 MB at ~64 bytes/entry; healthy feed delivery hard-max 45s with 5s heartbeats"
 
 requirements:
   - id: R1
@@ -99,7 +100,7 @@ gold:
     check: slot_match
     flow: feed_partition
     slot: policy
-    acceptable: [fallback-to-central-validation]
+    acceptable: [reject-all-fail-closed]
   - id: g4
     dimension: operability
     check: pattern_required
@@ -135,6 +136,11 @@ traps:
     description: Validate every request against the central auth service.
     violated_constraint_id: C2
     why_attractive: Central validation gives instant revocation with zero gateway state. But cross-region RTT is 20-80 ms against a 5 ms p99 validation budget — the request path cannot contain that call.
+  - id: T4
+    description: Fall back to central validation only when a gateway's revocation feed is stale.
+    violated_constraint_id: C2
+    why_attractive: >
+      It preserves availability and appears limited to a rare degraded mode. But the latency constraint contains no outage exception: every fallback validation adds 20-80 ms against the hard 5 ms p99 budget. No availability requirement justifies violating C2, so stale gateways must reject until caught up.
 
 twist:
   description: >
@@ -155,8 +161,8 @@ gold_rationale: |
   Mechanism (g1, T1, T3): the 60s mandate (C1) with a 5 ms validation budget
   (C2) rules out both stateless-until-expiry (revocation latency = token
   lifetime) and per-request central checks (20-80 ms RTT >> 5 ms). What
-  remains is local validation plus a pushed denylist: feed p99 5s <= 60s
-  satisfies C1, and an in-memory lookup costs microseconds.
+  remains is local validation plus a pushed denylist: the feed's contracted
+  45s maximum is below 60s and an in-memory lookup costs microseconds.
 
   Token lifetime is uniquely 15 minutes (g2) by two independent
   computations:
@@ -171,10 +177,11 @@ gold_rationale: |
     overlap: 640 MB > 400 MB — 24h fails.
   Only 15 minutes satisfies both inequalities.
 
-  Feed partition behavior (g3, g4, g5, g7): a gateway that has missed feed
-  heartbeats beyond a staleness bound can no longer promise C1 locally.
-  Fail-open silently breaks the mandate exactly when it matters; fail-closed
-  turns a feed hiccup into a global outage. The entailed fallback is
-  degraded-mode central validation (correct, slower, and rate-bounded — only
-  stale gateways use it), which is staleness-fallback plus
-  heartbeat-timeout-detection by name.
+  Feed partition behavior (g3, g4, g5, g7, T4): a gateway that misses three
+  5-second heartbeats is stale within 15 seconds and can no longer prove it
+  has every revocation. Fail-open breaks C1. Central fallback breaks C2 because
+  its 20-80 ms RTT is 4-16x the hard 5 ms validation budget, and C2 states no
+  degraded-mode exception. Rejecting all tokens until the feed catches up is
+  therefore the only listed policy satisfying every stated constraint. This
+  is a heartbeat-detected staleness fallback; availability during the feed
+  partition was deliberately not promised.

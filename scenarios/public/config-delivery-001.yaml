@@ -1,0 +1,198 @@
+# Config delivery where the postmortem narrative carries the binding facts
+# (haystack lever): the fail-static requirement and the blast-radius mandate
+# live inside the incident story, not the bullet list. The KV-watch canon
+# ("etcd/Consul watches, apply on change") is the scored trap.
+instance_id: config-delivery-001
+domain: platform-infra
+difficulty: medium
+version: "0.2.0"
+split: public
+
+problem_statement: |
+  Design the dynamic-configuration delivery system for a company running
+  ~10,000 service instances across three regions. Configuration includes
+  feature flags, operational tunables (timeouts, limits), and routing
+  weights. Change volume: ~200 config changes on a busy day, authored by
+  ~80 engineers.
+
+  The system replaces the current one following the March incident. Read
+  the incident review below carefully; the replacement's requirements were
+  set by its review board.
+
+context: |
+  Incident review 2026-03-11 (condensed). At 14:02 an engineer landed a
+  routing-weight change containing a malformed region key. The config
+  service validated syntax but not semantics, and the watch-based delivery
+  layer applied the change to all 10,000 instances inside 90 seconds.
+  Request error rate reached 34% globally by 14:05. The on-call reverted
+  at 14:19 (17 minutes of global impact) — the revert itself propagated
+  in 90 seconds, which the board noted with some irony.
+
+  During the same window, a second failure compounded the first: the
+  config service, overwhelmed by watch reconnections, went unavailable
+  for 22 minutes. Instances that restarted during that window (including
+  autoscaler churn responding to the error spike) came up with EMPTY
+  configuration — the client library treats a fetch failure at startup as
+  "no overrides" — and served requests with compiled-in defaults, which
+  for two services meant routing to a decommissioned database endpoint.
+  Board finding 7: an instance must be able to start and serve correctly
+  using the last configuration it successfully held, whether or not the
+  config service is reachable; compiled-in defaults are not an acceptable
+  substitute for last-known-good.
+
+  Board finding 4: no single change may reach the whole fleet in one
+  step again. Changes shall be exposed progressively with automated
+  health evaluation between stages, and an unhealthy stage shall halt and
+  revert the change without human action. The 17-minute human revert loop
+  is the ceiling being designed away, not the target.
+
+  Unrelated notes for completeness: the incident coincided with the
+  Kubernetes 1.31 upgrade in us-east (ruled out as contributing); the
+  TLS certificate for the legacy config UI expired the same afternoon
+  (cosmetic; the UI is being retired regardless).
+
+constraints:
+  - id: C1
+    type: availability
+    value: "instances must start and serve correctly when the config service is unreachable, using last-known-good configuration (board finding 7)"
+  - id: C2
+    type: compliance
+    value: "no change reaches the whole fleet in one step; progressive exposure with automated health gates and automatic halt/revert (board finding 4)"
+  - id: C3
+    type: scale
+    value: "~10,000 instances, 3 regions, ~200 changes/day, ~80 authors"
+  - id: C4
+    type: latency
+    value: "routine changes should reach the full fleet within 30 minutes once stages pass; emergency kill-switch flags within 2 minutes fleet-wide"
+
+requirements:
+  - id: R1
+    text: Deliver config changes to 10,000 instances with progressive, health-gated exposure.
+  - id: R2
+    text: A bad change is halted and reverted automatically before fleet-wide impact.
+  - id: R3
+    text: Instances start and serve correctly during config-service unavailability.
+  - id: R4
+    text: Emergency kill-switch flags propagate fleet-wide within 2 minutes.
+
+flows:
+  - id: change_exposure
+    description: How a config change reaches the fleet.
+    decision_slots:
+      strategy: [staged-cohorts-with-automated-health-gates, apply-to-all-watchers-on-publish]
+  - id: bad_change
+    description: What happens when a stage's health evaluation fails.
+    decision_slots:
+      response: [automatic-halt-and-revert, page-oncall-for-manual-revert]
+  - id: source_unavailable
+    description: Instance behavior when the config service is unreachable (including at startup).
+    decision_slots:
+      policy: [serve-from-persisted-last-known-good, block-startup-until-available, start-with-compiled-defaults]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: operability
+    check: slot_match
+    flow: change_exposure
+    slot: strategy
+    acceptable: [staged-cohorts-with-automated-health-gates]
+  - id: g2
+    dimension: operability
+    check: pattern_required
+    acceptable: [staged-rollout]
+  - id: g3
+    dimension: operability
+    check: slot_match
+    flow: bad_change
+    slot: response
+    acceptable: [automatic-halt-and-revert]
+  - id: g4
+    dimension: operability
+    check: slot_match
+    flow: source_unavailable
+    slot: policy
+    acceptable: [serve-from-persisted-last-known-good]
+  - id: g5
+    dimension: operability
+    check: pattern_required
+    acceptable: [fail-static]
+  - id: g6
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [fail-static]
+  - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [staged-rollout, rollback-plan]
+  - id: g8
+    dimension: operability
+    check: pattern_required
+    acceptable: [kill-switch]
+  - id: g9
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 7
+
+traps:
+  - id: T1
+    description: KV store with watches — publish once, every instance applies within seconds.
+    violated_constraint_id: C2
+    why_attractive: "It is the canonical config-delivery architecture (etcd/Consul/ZooKeeper watches), it is operationally simple, and fast global propagation FEELS like a feature — it is literally the property that turned one malformed key into 34% global errors in 90 seconds. Board finding 4 exists to forbid exactly this."
+  - id: T2
+    description: Treat startup-without-config as "use compiled-in defaults" (or block startup until the service answers).
+    violated_constraint_id: C1
+    why_attractive: "Both are common client-library defaults and both feel principled ('safe defaults' / 'fail fast'). The incident showed each failing in production: compiled defaults routed to a decommissioned database; blocking startup would have turned autoscaler churn into an availability spiral while the config service was down."
+  - id: T3
+    description: Satisfy finding 4 with a manual canary — expose to 1%, page a human to eyeball dashboards, proceed on approval.
+    violated_constraint_id: C2
+    why_attractive: It preserves human judgment and is how most orgs actually run canaries. But finding 4 names automated evaluation and automatic halt/revert — the 17-minute human loop IS the failure mode being retired, and 200 changes/day does not fit human-gated stages anyway.
+
+twist:
+  description: >
+    A config system specified almost entirely through its predecessor's
+    postmortem: the two binding requirements (fail-static last-known-good,
+    automated staged exposure) live inside the incident narrative, while
+    the canonical architecture for this problem is the one the incident
+    indicts.
+  invalidated_canonical: >
+    The KV-watch canon (publish to etcd/Consul, watchers apply immediately)
+    fails g1/T1 — instant global propagation is the indicted property, not
+    a feature. And standard client-library failure behavior (compiled
+    defaults or fail-fast startup) fails g4/g5/T2 against board finding 7,
+    which mandates persisted last-known-good. Models that pattern-match
+    the problem type without absorbing the postmortem recite their way
+    into both traps.
+  twist_gold_refs: [g1, g4, g5]
+
+gold_rationale: |
+  Progressive exposure (g1-g3, g7, T1, T3): finding 4 is explicit — no
+  single-step fleet-wide exposure, automated health gates, automatic
+  halt/revert. That is staged-rollout by name: cohorts (instance %, then
+  region) with health evaluation (error rate, latency versus baseline)
+  between stages, and the change engine reverting a failed stage without
+  a human. The KV-watch design cannot express stages (a publish IS
+  fleet-wide), and human-gated canaries reinstate the 17-minute loop the
+  board retired. Blast-radius math: 1% first stage caps a malformed
+  change at ~100 instances versus 10,000.
+
+  Fail-static (g4-g6, T2): finding 7 requires instances to start and
+  serve from the last configuration they successfully held — i.e., each
+  instance persists its last-known-good config locally (disk) and treats
+  the config service as a source of UPDATES, not a startup dependency.
+  Compiled-in defaults are named unacceptable (they routed to a
+  decommissioned endpoint); blocking startup converts config-service
+  downtime into fleet-wide inability to scale or recover — the compounding
+  failure from the incident.
+
+  Kill-switch tension (g8, C4): the 2-minute emergency path coexists with
+  staged routine delivery — an explicitly privileged, pre-authorized flag
+  class (operator-triggered kill switches) may bypass stages. Designing
+  ONE pipeline for both requirements gets either a too-slow kill switch
+  or an unstaged fleet — the C4/C2 pair is only satisfiable by separating
+  the paths.

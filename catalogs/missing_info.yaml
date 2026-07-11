@@ -1,7 +1,7 @@
 # SysDesign-Bench missing-information taxonomy.
 # In clarify mode the model lists the keys it needs before it can design responsibly.
 # Graded as: gold-required keys ⊆ answer ⊆ gold-allowed keys.
-version: "0.2.0"
+version: "0.3.0"
 missing_info:
   - id: expected_read_qps
     name: Expected read throughput
@@ -63,3 +63,15 @@ missing_info:
   - id: security_requirements
     name: Security requirements
     description: AuthN/AuthZ model, encryption, threat assumptions.
+  - id: server_trust_model
+    name: Server plaintext trust model
+    description: Whether service operators and servers may access plaintext or must remain cryptographically unable to decrypt user content.
+  - id: membership_revocation_scope
+    name: Membership revocation scope
+    description: Whether removing a member blocks only future access or must also revoke access to previously delivered content.
+  - id: privacy_unit
+    name: Differential-privacy unit
+    description: The protected adjacency unit, such as a person, household, device, or event, across which privacy loss composes.
+  - id: privacy_budget_definition
+    name: Privacy-budget definition
+    description: The epsilon/delta budget, composition rule, and reset window governing repeated differentially private releases.

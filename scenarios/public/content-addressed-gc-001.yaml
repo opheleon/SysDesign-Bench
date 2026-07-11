@@ -1,0 +1,229 @@
+# Concurrent garbage collection over a shared immutable DAG. The safety result
+# depends on a logical root epoch, post-cut publication barrier, transitive mark,
+# and a numerically pinned quarantine window.
+instance_id: content-addressed-gc-001
+domain: content-addressed-storage
+difficulty: hard
+version: "0.3.0"
+split: public
+
+problem_statement: |
+  A backup service stores immutable chunks and manifests by content hash. A
+  tenant root points to a manifest DAG; snapshots and clones share arbitrary
+  subgraphs. Deleting one root does not imply that any particular descendant is
+  dead. Uploads write chunks before publishing their final root.
+
+  The service has 4 billion chunks, 60 million committed roots, and root DAGs
+  as large as 10 million chunks. Snapshot/clone publication must remain O(1)
+  and p99 <= 100 ms. The authoritative root registry and object store do not
+  support a transaction spanning every referenced object, so synchronously
+  incrementing millions of per-chunk reference counts during publication is
+  unavailable.
+
+  Root mutations and upload-session reservations commit in one serializable
+  registry. Each commit receives a monotonically increasing epoch and writes a
+  mutation-journal record transactionally. A committed journal record becomes
+  visible to every GC/delete worker within a hard 90 minutes; worker scheduling
+  and clock margin add at most 15 minutes. An upload records each chunk under a
+  leased session before the object is accepted; sessions last at most 6 hours
+  and are roots until commit or expiry.
+
+  Garbage collection starts every 24 hours and a complete distributed
+  mark/sweep takes at most 18 hours. A chunk that becomes unreachable must be
+  physically reclaimed within 48 hours. Root writes and uploads may not be
+  globally paused during collection. A publication after the collector's cut
+  can synchronously observe a chunk's quarantine state; before making a new
+  root visible, it must either establish protection or fail and retry.
+
+  Design collection over the shared DAG, including the root cut, concurrent
+  publication protocol, resumable marking, and final deletion. Choose the
+  quarantine interval from the supplied options and prove both safety and the
+  48-hour bound.
+
+context: |
+  Content hashes make chunks immutable but do not prove liveness. Manifest
+  edges are acyclic and immutable. Root deletion and publication are the only
+  operations that change reachability; session expiry removes an upload root.
+  The root mutation journal is retained for seven days. A final deletion check
+  can query the epoch-indexed root/session registry and quarantine index.
+
+constraints:
+  - id: C1
+    type: durability
+    value: "a chunk reachable from any committed root or unexpired upload-session root must never be physically deleted, including during concurrent clone, snapshot, upload, and root deletion"
+  - id: C2
+    type: latency
+    value: "snapshot/clone root publication remains O(1) and p99 <= 100 ms; root writes and uploads cannot be paused for the 18-hour collection"
+  - id: C3
+    type: scale
+    value: "4B chunks, 60M roots, DAGs up to 10M chunks; GC runs every 24h and distributed mark/sweep completes within 18h"
+  - id: C4
+    type: durability
+    value: "every unreachable chunk is physically reclaimed within 48h"
+  - id: C5
+    type: network
+    value: "root/session journal visibility to GC workers is bounded by 90 minutes plus 15 minutes of scheduling/clock margin"
+
+requirements:
+  - id: R1
+    text: Take one epoch-consistent cut of committed roots and live upload sessions, and retain the ordered mutation history after that cut.
+  - id: R2
+    text: Traverse the complete manifest DAG from that cut with distributed, checkpointed mark-and-sweep work.
+  - id: R3
+    text: Quarantine an unmarked candidate and perform an authoritative reachability/protection recheck before physical deletion.
+  - id: R4
+    text: Publish every post-cut root or upload reservation with a transactional protection intent that cancels quarantine before the new reference becomes visible.
+
+flows:
+  - id: root_cut
+    description: The logical source set for one GC generation.
+    decision_slots:
+      capture: [single-epoch-roots-plus-live-upload-sessions, independently-scan-each-root-shard-live, list-object-store-prefixes]
+  - id: reachability
+    description: How liveness is computed over shared immutable manifests at 4B-chunk scale.
+    decision_slots:
+      collector: [transitive-distributed-mark-and-sweep, asynchronous-reference-counts-with-immediate-delete, delete-unrooted-leaf-chunks]
+      progress: [durable-checkpointed-work-partitions, restart-entire-mark-on-worker-failure, best-effort-in-memory-frontier]
+  - id: concurrent_publication
+    description: How a root/session committed after the epoch cut protects referenced chunks.
+    decision_slots:
+      barrier: [journal-protection-and-cancel-quarantine-before-publish, publish-then-repair-if-gc-deletes, globally-pause-publishers]
+  - id: physical_deletion
+    description: Transition from unmarked candidate to absent object.
+    decision_slots:
+      policy: [soft-quarantine-then-final-authoritative-recheck, delete-immediately-after-sweep, delete-by-chunk-creation-age]
+      quarantine: [zero-minutes, two-hours, twelve-hours]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: root_cut
+    slot: capture
+    acceptable: [single-epoch-roots-plus-live-upload-sessions]
+  - id: g2
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: reachability
+    slot: collector
+    acceptable: [transitive-distributed-mark-and-sweep]
+  - id: g3
+    dimension: operability
+    check: slot_match
+    flow: reachability
+    slot: progress
+    acceptable: [durable-checkpointed-work-partitions]
+  - id: g4
+    dimension: migration_safety
+    check: slot_match
+    flow: concurrent_publication
+    slot: barrier
+    acceptable: [journal-protection-and-cancel-quarantine-before-publish]
+  - id: g5
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: physical_deletion
+    slot: policy
+    acceptable: [soft-quarantine-then-final-authoritative-recheck]
+  - id: g6
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: physical_deletion
+    slot: quarantine
+    acceptable: [two-hours]
+  - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [temporal-audit-log]
+  - id: g8
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [batch-processing, checkpoint-resume]
+  - id: g9
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [soft-deletes]
+  - id: g10
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
+    acceptable: [outbox]
+  - id: g11
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 7
+
+traps:
+  - id: T1
+    description: Maintain asynchronous per-chunk reference counts and delete a chunk immediately when its observed count reaches zero.
+    violated_constraint_id: C1
+    why_attractive: Reference counting sounds tailor-made for shared content and avoids scanning 4 billion objects. Here a root commit cannot atomically update up to 10 million object-store counters, and registry events may lag 105 minutes. A count can transiently reach zero while a committed clone or upload still references the chunk; immediate deletion makes that lag irreversible.
+  - id: T2
+    description: Scan each root-registry shard independently while mutations continue and union whatever each worker happens to see.
+    violated_constraint_id: C1
+    why_attractive: Every individual scan is accurate when it runs, and an over-approximate union feels conservative. Without one epoch, workers can combine a source root after removal with its destination clone before creation, or miss both sides across different scan times. A moving collection is not a logical state and cannot prove an unmarked object unreachable.
+  - id: T3
+    description: Use a long 12-hour quarantine to be extra safe before final deletion.
+    violated_constraint_id: C4
+    why_attractive: >
+      Longer grace periods usually increase safety and 12 hours sounds small beside seven-year retention. A chunk can become unreachable just after a cut, wait 24 hours for the next cut, spend 18 hours in mark/sweep, then wait 12 hours: 54 hours exceeds the hard 48-hour reclamation bound.
+
+twist:
+  description: >
+    Immutability and hashes solve identity, not concurrent liveness. The hard
+    part is composing an epoch cut with post-cut publication so a reference
+    created during an 18-hour traversal cannot race physical deletion.
+  invalidated_canonical: >
+    "Content-addressed storage uses reference counts" fails g1-g6 at this
+    publication scale and across the registry/object-store boundary. Safety
+    requires a consistent root generation, transitive marking, a write barrier,
+    and delayed revalidation; the 48-hour SLA then makes the delay exactly two
+    hours among the offered values.
+  twist_gold_refs: [g1, g2, g4, g5, g6]
+
+gold_rationale: |
+  Consistent liveness (g1, g7, T2): the collector allocates epoch E in the
+  serializable root registry and captures exactly the committed tenant roots
+  and unexpired upload-session roots at E. Upload chunks are registered under a
+  leased session before object acceptance, so even an unpublished upload is a
+  root. The temporal mutation journal preserves every change after E. Scanning
+  independent moving shards cannot establish a state that ever existed.
+
+  Reachability (g2, g3, g8): starting from the E root set, workers transitively
+  mark manifests and chunks. Sharing makes root deletion nonlocal: an object is
+  collectible only if no path from any root reaches it, not because one parent
+  disappeared or an asynchronously observed counter reached zero. Four billion
+  chunks require partitioned batch work; durable frontier/partition checkpoints
+  let failed workers resume without discarding an 18-hour pass.
+
+  Concurrent mutation proof (g4, g10): a root or session publication after E
+  writes its protection intent in the same registry transaction as the new
+  root (transactional outbox). Before visibility, the publisher checks the
+  quarantine index and cancels/quarantines protection for every newly referenced
+  subgraph root; if it cannot establish protection, publication fails and
+  retries. Mutations committed just before a quarantine transition can be
+  absent from a worker's lagging view for at most 90+15=105 minutes. Mutations
+  after the transition encounter the barrier. Thus the collector covers
+  pre-E references by the mark, racing pre-transition references by the bounded
+  journal window, and post-transition references by the publication barrier.
+
+  Deletion and exact interval (g5, g6, g9, T1, T3): sweep performs a soft state
+  transition to quarantine, never immediate deletion. Two hours is 120 minutes,
+  which exceeds the hard 105-minute observation bound by 15 minutes. At expiry,
+  the deleter rechecks the authoritative epoch-indexed root/session and
+  protection state; any mark, live session, later root, or cancellation returns
+  the object to live state. Zero minutes is below 105 and unsafe.
+
+  The upper-bound calculation eliminates twelve hours. Worst case, a chunk
+  becomes unreachable just after a cut: it waits <24 hours for the next run,
+  then <=18 hours for mark/sweep, then 2 hours in quarantine, totaling <44
+  hours, within C4. Twelve hours produces up to 24+18+12=54 hours, violating
+  C4. Therefore two hours is the only offered duration satisfying both
+  105 minutes <= quarantine and 24h+18h+quarantine <= 48h.

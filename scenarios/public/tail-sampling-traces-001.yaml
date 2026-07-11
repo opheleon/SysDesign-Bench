@@ -1,0 +1,196 @@
+# An observability quota that cannot be met with independent/head sampling:
+# whether a trace is mandatory is known only at its tail, while retaining all
+# mandatory traces leaves a precisely bounded residual budget for normals.
+instance_id: tail-sampling-traces-001
+domain: observability
+difficulty: hard
+version: "0.3.0"
+split: public
+
+problem_statement: |
+  A platform emits 20,000 distributed traces per second. Compliance permits
+  permanent storage of at most 1.00% of distinct trace IDs in every ten-minute
+  window, but requires permanent retention of the COMPLETE trace when either:
+
+  - any span finishes with an error, or
+  - root end-to-end latency exceeds 2 seconds.
+
+  Both facts can become known only when the relevant span or root finishes.
+  The measured union of error-or-slow traces is contractually capped at 0.40%
+  in a ten-minute window; overload beyond that cap is handled by a separate
+  incident mode outside this scenario. Product engineers also require a
+  representative baseline sample of normal traces using whatever quota
+  remains.
+
+  A trace lasts at most 30 seconds, all spans are exported within 5 seconds of
+  root completion, and one assembled trace including indexes is at most 32 KB.
+  The assembly tier has eight 8-GB collectors. It must keep two live copies of
+  each unsealed assembly and may use a 40-second bound measured from root start.
+
+  Design trace identity propagation, assembly, the sampling decision, and the
+  exact normal-trace sampling budget.
+
+context: |
+  A trace crosses between 2 and 20 independently deployed services. Every
+  service and collector can be changed. The long-term store bills and enforces
+  quota by distinct trace ID, not span count. Hashing trace ID gives uniform
+  distribution across collectors. Decimal units are used for the capacity
+  calculation: 1 GB = 10^9 bytes and 1 KB = 10^3 bytes.
+
+constraints:
+  - id: C1
+    type: compliance
+    value: "retain every complete trace containing any error span or root latency > 2 seconds; the decision is known only at trace completion"
+  - id: C2
+    type: budget
+    value: "permanently store <= 1.00% of distinct trace IDs in every ten-minute window; interesting-trace union is <= 0.40%"
+  - id: C3
+    type: scale
+    value: "20,000 traces/s, <= 40 seconds assembly residence, <= 32 KB assembled size, two live copies, eight collectors with 8 GB each"
+  - id: C4
+    type: durability
+    value: "all retained traces are end-to-end complete across 2-20 services, not disconnected service-local fragments"
+
+requirements:
+  - id: R1
+    text: A single trace identity follows a request end to end and all of its spans are assembled before the keep/drop decision.
+  - id: R2
+    text: Every error-or-slow trace is retained while normal sampling consumes the largest safe remainder of the 1.00% quota.
+  - id: R3
+    text: In-flight assembly state has a proved finite residence and capacity bound with two live copies.
+  - id: R4
+    text: All spans for one trace are routed to the same logical assembler while spreading different traces uniformly.
+
+flows:
+  - id: trace_correlation
+    description: Propagating identity and routing spans into complete trace assemblies.
+    decision_slots:
+      context: [service-local-trace-identities, propagate-one-trace-id-end-to-end]
+      assembly_route: [round-robin-individual-spans, hash-trace-id-to-replicated-assembler]
+  - id: sampling
+    description: Choosing which complete traces enter permanent storage.
+    decision_slots:
+      decision_point: [one-percent-head-sample-at-root-start, independent-one-percent-per-service, tail-decision-after-trace-seal]
+      quota_policy: [retain-all-interesting-plus-one-percent-of-normal, retain-all-interesting-plus-zero-point-six-percent-of-normal, uniform-one-percent-of-all-traces]
+  - id: assembly_lifecycle
+    description: Bounding how long unsealed trace state remains in the assembly tier.
+    decision_slots:
+      bound: [wait-unbounded-for-late-spans, evict-thirty-seconds-from-root-start, seal-by-forty-seconds-in-bounded-replicated-buffer]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: trace_correlation
+    slot: context
+    acceptable: [propagate-one-trace-id-end-to-end]
+  - id: g2
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: trace_correlation
+    slot: assembly_route
+    acceptable: [hash-trace-id-to-replicated-assembler]
+  - id: g3
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: sampling
+    slot: decision_point
+    acceptable: [tail-decision-after-trace-seal]
+  - id: g4
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: sampling
+    slot: quota_policy
+    acceptable: [retain-all-interesting-plus-zero-point-six-percent-of-normal]
+  - id: g5
+    dimension: operability
+    check: slot_match
+    flow: assembly_lifecycle
+    slot: bound
+    acceptable: [seal-by-forty-seconds-in-bounded-replicated-buffer]
+  - id: g6
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [tail-based-sampling]
+  - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [tail-based-sampling]
+  - id: g8
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [bounded-queues]
+  - id: g9
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
+    acceptable: [hash-partitioning]
+  - id: g10
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 7
+
+traps:
+  - id: T1
+    description: Make a uniform 1% keep/drop decision at the root when each trace starts.
+    violated_constraint_id: C1
+    why_attractive: Head sampling is cheap, immediately bounds collector traffic, and is the standard answer to a 1% trace budget. The error bit and final root latency do not exist yet, so 99% of later error-or-slow traces can already have been irreversibly dropped. Re-promoting only the final error span cannot reconstruct the discarded trace.
+  - id: T2
+    description: Tail-retain every interesting trace, then sample 1% of normal traces as the baseline.
+    violated_constraint_id: C2
+    why_attractive: It reads as "mandatory traces plus the ordinary 1% sample" and preserves the familiar normal sampling setting. At the allowed 0.40% interesting maximum it stores 0.40% + 1% of the remaining 99.60% = 1.396%, exceeding the hard 1.00% quota by almost 40%.
+  - id: T3
+    description: Let each service independently sample 1% of its spans and join whatever fragments reach storage.
+    violated_constraint_id: C4
+    why_attractive: Service-local sampling avoids a central assembly tier and each team can enforce its own quota. For a k-service trace, independent inclusion of every required fragment has probability 0.01^k; even when the root is retained, almost all downstream context is absent. It cannot produce the required complete trace.
+
+twist:
+  description: >
+    The storage percentage is not the sampling probability. Mandatory status is
+    a tail property, so the system must temporarily assemble 100% of traces,
+    keep a bounded mandatory union, and spend only the mathematically remaining
+    quota on normal traces.
+  invalidated_canonical: >
+    Canonical 1% head sampling fails g3 and g6-g7 because it decides before
+    errors and end-to-end latency are known. Applying the same 1% again to
+    normals fails g4. Service-local sampling and unbounded joining also fail g1,
+    g2, and g5 by producing fragments or unbounded state rather than complete
+    sealed traces.
+  twist_gold_refs: [g1, g2, g3, g4, g5]
+
+gold_rationale: |
+  Correlation and decision timing (g1-g3, g6, g9, T1, T3): every service must
+  propagate one trace ID. Hashing that ID, rather than individual spans, sends
+  all fragments to one logical assembly shard; a second live copy protects an
+  unsealed trace. Because an error may be on the last child and the >2 s fact is
+  known only when the root ends, a keep decision before sealing cannot satisfy
+  C1. Tail-based sampling buffers the complete candidate, seals after the
+  stated export bound, and only then applies mandatory and baseline rules.
+
+  Quota proof (g4, g7, T2): ten minutes contains
+
+      N = 20,000 * 600 = 12,000,000 traces.
+
+  Permanent capacity is 0.01N = 120,000 traces. At the worst permitted union,
+  mandatory traces are 0.004N = 48,000, leaving at most 72,000 slots. Sampling
+  0.6% of the 11,952,000 normal traces keeps 71,712, for a total of 119,712 =
+  0.9976N. It is the largest offered safe baseline. Sampling 1% of normals
+  keeps 119,520 normals plus 48,000 mandatory = 167,520 = 1.396N. A uniform 1%
+  total sample meets the budget but retains only about 480 of 48,000 mandatory
+  traces in expectation, so only the 0.6%-of-normal policy meets both C1 and C2.
+
+  Assembly bound (g5, g8): a root lasts at most 30 seconds and every span is
+  exported within another 5 seconds, so 40 seconds is a conservative finite
+  seal bound; 30 seconds can evict a maximum-duration trace before export.
+  Worst-case live assemblies are 20,000 * 40 = 800,000. One copy uses at most
+  800,000 * 32 KB = 25.6 GB; two use 51.2 GB. The eight collectors provide
+  64 GB, exactly 25% above that proved bound. Bounded queues plus alerting make
+  contract violations explicit; waiting forever would turn a missing span into
+  an unbounded memory leak.

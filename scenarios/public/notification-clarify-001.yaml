@@ -1,0 +1,119 @@
+# Clarify-mode scenario: "build us a notification system" with the two facts
+# that decide the architecture deleted. Push-vs-poll and the delivery stack
+# are mutually exclusive under plausible answers to the missing questions, so
+# designing anyway is the scored failure. Tight allowed-set punishes spam.
+instance_id: notification-clarify-001
+domain: notifications
+difficulty: medium
+version: "0.2.0"
+split: public
+
+problem_statement: |
+  Product leadership wants a "notification system" for the company's
+  platform: order updates, mentions, digests, marketing sends — "all of
+  it, unified." The previous attempt was an email-only script a departed
+  engineer wrote; nobody trusts it.
+
+  What is known: notifications have per-user preferences and quiet hours;
+  marketing sends require unsubscribe compliance; transactional
+  notifications matter more than marketing ones. Leadership wants the
+  architecture proposal this week.
+
+  If information critical to the architectural choice is missing, say
+  exactly what you need. Otherwise, design the system.
+
+context: |
+  Nobody in the room could say which client surfaces exist for delivery
+  (native mobile apps? web only? email only?) — the mobile app is "being
+  rethought" by a separate org. Nobody had volume figures either: the
+  platform's user count is known internally but notification triggers per
+  user ("all of it, unified") have never been measured, and marketing's
+  send calendar is owned by an agency. Consistency requirements, retention
+  policy, and the team's operational maturity were all discussed and are
+  unremarkable for this company.
+
+constraints:
+  - id: C1
+    type: scale
+    value: "notification volume (triggers/second, sends/day) is unmeasured and unstated"
+    stated_in_prompt: false
+  - id: C2
+    type: other
+    value: "delivery client platforms (native push? web? email-only?) are undetermined - owned by another org"
+    stated_in_prompt: false
+
+requirements:
+  - id: R1
+    text: Unified notification delivery across transactional, social, and marketing classes.
+  - id: R2
+    text: Per-user preferences, quiet hours, and unsubscribe compliance.
+
+flows: []
+
+relaxation_options: []
+
+expected_mode: clarify
+
+gold:
+  - id: g1
+    dimension: clarification_seeking
+    check: missing_info
+    required: [client_platforms, expected_write_qps]
+    allowed: [client_platforms, expected_write_qps, peak_to_average_ratio, latency_target_write, expected_read_qps]
+
+traps:
+  - id: T1
+    description: Design the standard notification architecture anyway (queue + preference service + channel adapters for push/email/SMS + digest batcher).
+    violated_constraint_id: C2
+    why_attractive: The notification-system reference architecture is one of the most-published designs anywhere, and its shape LOOKS platform-agnostic — adapters for everything! But whether the core is a mobile-push pipeline (APNs/FCM token lifecycle, per-device fan-out), a web/SSE delivery tier, or an email compliance engine changes the system fundamentally; adapters-for-everything at unknown volume is an assumption wearing an architecture costume.
+  - id: T2
+    description: Ask about everything — team size, retention, security posture, budget, consistency, SLAs — a due-diligence questionnaire.
+    violated_constraint_id: C1
+    why_attractive: Thoroughness feels safer than precision, and all those questions are individually reasonable someday. But the context states consistency, retention, and team maturity were discussed and are unremarkable; the architecture is gated by exactly two unknowns (where notifications are delivered, and how many there are). Spraying questions pushes the decision back without identifying what gates it.
+
+twist:
+  description: >
+    The most-published reference architecture in the domain, requested with
+    the two facts that select among its variants deleted — and with the
+    NON-gating facts explicitly marked as settled, so indiscriminate
+    question-asking is scored too.
+  invalidated_canonical: >
+    Reciting the canonical notification-system design (queue, preference
+    store, channel adapters, digest workers) fails via mode-gating: with
+    client platforms unknown (the mobile app's existence is literally
+    undetermined) and volume unmeasured, the correct designs under
+    plausible answers are mutually exclusive — a push-token pipeline, a
+    web-push/SSE tier, and an email-first compliance engine share almost
+    no load-bearing structure, and capacity choices at unknown volume are
+    guesses. Clarify is the only correct mode, and the questions that gate
+    the fork are exactly two.
+  twist_gold_refs: [g1]
+
+gold_rationale: |
+  Why exactly these two keys gate everything: (1) client_platforms — the
+  delivery substrate decides the core architecture. Native mobile push
+  means token lifecycle management, per-device fan-out, and platform
+  provider quotas (APNs/FCM); web-only means SSE/web-push with session
+  presence; email-only means an entirely different system centered on
+  sending reputation and compliance. These are not variants of one
+  design; they are different systems. The context makes this genuinely
+  unknowable in-room (the mobile app is another org's open question).
+  (2) expected_write_qps — trigger volume decides whether this is a
+  single-service-plus-queue problem or a fan-out platform with
+  per-channel rate management; "all of it, unified" with an agency-owned
+  marketing calendar could be 10/second or 50,000/second, and those
+  designs differ in kind, not degree.
+
+  Why the allowed set is tight (T2): peak-to-average ratio, read volume,
+  and a latency target refine the same capacity decision and are
+  tolerated. Consistency, retention, and team maturity are explicitly
+  stated as discussed-and-unremarkable — asking for them signals
+  checklist-spam rather than identifying the gate. The grader's
+  allowed-set check fails a model that asks more broadly than the stated
+  unknowns justify.
+
+  Why designing anyway fails (T1): under mode-gating, a design submission
+  scores zero here. The trap's pull is real — R1/R2 read like enough of a
+  spec to start, and the reference architecture is memorized — which is
+  precisely what makes this a clarification-seeking test rather than a
+  recall test.

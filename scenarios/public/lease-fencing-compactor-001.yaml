@@ -1,0 +1,180 @@
+# A compaction lease is not enough when an old holder pauses past expiry and
+# resumes. Correctness comes from a monotonically increasing epoch enforced
+# atomically by the metadata sink, not from the worker checking its own lease.
+instance_id: lease-fencing-compactor-001
+domain: distributed-storage-maintenance
+difficulty: hard
+version: "0.3.0"
+split: public
+
+problem_statement: |
+  A distributed LSM service compacts each shard in the background. Exactly one
+  compactor should publish a new manifest for a shard at a time. Workers acquire
+  a 30-second lease from the shard's metadata database and renew every 10
+  seconds. Compaction reads immutable input files, writes new immutable files,
+  and finally changes the authoritative manifest.
+
+  The observed failure is repeatable:
+
+  1. W1 acquires shard 7, starts a compaction, and then pauses for 90 seconds.
+  2. W1's lease expires. W2 acquires shard 7, completes a newer compaction, and
+     publishes its manifest.
+  3. W1 resumes with its old process memory and attempts its final publish.
+
+  Pauses can occur after any worker-side lease check and before the following
+  network write. Process clocks may skew by 5 seconds. The metadata database can
+  atomically grant a lease by incrementing a per-shard integer epoch and can
+  condition every manifest mutation on that current epoch. New output files are
+  not visible to readers until referenced by a committed manifest.
+
+  Design lease acquisition, manifest publication, and cleanup/retry behavior so
+  the stale W1 can never overwrite W2, while a failed holder is still replaced.
+
+context: |
+  Input and output files are content-addressed and immutable. Orphan output files
+  may be deleted after a quarantine interval. The metadata database is the sole
+  authority for both the lease epoch and the manifest pointer; no correctness
+  decision needs a worker's wall clock.
+
+constraints:
+  - id: C1
+    type: consistency
+    value: "after a newer lease is granted, no mutation from an older holder may become authoritative, even if it resumes after an arbitrary pause"
+  - id: C2
+    type: durability
+    value: "a crash or rejected stale publish must not corrupt live files or expose a partial compaction"
+  - id: C3
+    type: availability
+    value: "a failed or paused holder is replaced after the 30-second lease expires; manual recovery is not on the liveness path"
+  - id: C4
+    type: other
+    value: "worker clocks can skew by 5 seconds and a pause can occur between any worker-side check and write"
+
+requirements:
+  - id: R1
+    text: Fence every stale manifest mutation at the authoritative metadata sink.
+  - id: R2
+    text: Make compaction retries safe without exposing or overwriting partial output.
+  - id: R3
+    text: Replace an expired owner automatically so compaction continues.
+
+flows:
+  - id: lease_grant
+    description: The authority attached to a newly granted shard lease.
+    decision_slots:
+      token:
+        - atomically-incremented-per-shard-fencing-epoch
+        - random-owner-id-plus-expiry-timestamp
+        - worker-start-time-from-local-clock
+  - id: manifest_publish
+    description: The final mutation that makes compaction output authoritative.
+    decision_slots:
+      guard:
+        - atomic-conditional-commit-only-if-epoch-equals-current-shard-fence
+        - worker-rechecks-lease-then-unconditionally-writes-manifest
+        - accept-last-arriving-manifest-write
+  - id: output_lifecycle
+    description: Treatment of files produced before a successful manifest commit.
+    decision_slots:
+      policy:
+        - immutable-staging-publish-manifest-last-quarantine-orphans
+        - overwrite-input-files-in-place-then-update-manifest
+        - expose-output-prefix-while-compaction-runs
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: lease_grant
+    slot: token
+    acceptable: [atomically-incremented-per-shard-fencing-epoch]
+  - id: g2
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: manifest_publish
+    slot: guard
+    acceptable: [atomic-conditional-commit-only-if-epoch-equals-current-shard-fence]
+  - id: g3
+    dimension: operability
+    check: slot_match
+    flow: output_lifecycle
+    slot: policy
+    acceptable: [immutable-staging-publish-manifest-last-quarantine-orphans]
+  - id: g4
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [fencing-tokens]
+  - id: g5
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [idempotency-keys, checkpoint-resume]
+  - id: g6
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [distributed-lock, leader-election]
+  - id: g7
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 6
+
+traps:
+  - id: T1
+    description: Use the expiring distributed lease as the complete correctness mechanism; a second live holder means the lease service is broken.
+    violated_constraint_id: C1
+    why_attractive: A lease is the canonical single-owner primitive, and W2 is correctly entitled to run after 30 seconds. But expiry changes the authority while it cannot stop W1's process or packets. Mutual exclusion at grant time does not revoke a stale holder already paused in user space.
+  - id: T2
+    description: Have W1 read the lease immediately before publication and write the manifest if the read says it still owns the shard.
+    violated_constraint_id: C4
+    why_attractive: A fresh read appears to close the stale-cache problem and is easy to add. The stated pause may occur after that read and before the write; W2 can be granted the next epoch in the gap. Only one atomic sink-side conditional closes the time-of-check/time-of-use race.
+  - id: T3
+    description: Compact by rewriting the live input files in place so failed attempts leave no orphan objects.
+    violated_constraint_id: C2
+    why_attractive: In-place output avoids temporary storage and garbage collection. A crash or fenced publish then leaves readers with partially rewritten files, while immutable staged output plus publish-last makes rejection harmless and cleanup asynchronous.
+
+twist:
+  description: >
+    A textbook distributed-lock problem in which the lock behaves correctly but
+    cannot stop a paused former owner; authority must travel as a monotonic token
+    and be enforced by the resource being mutated.
+  invalidated_canonical: >
+    "Acquire a lease, renew it, and check it before commit" fails g1, g2, and g4.
+    Expiry grants liveness, not revocation. The metadata sink must atomically
+    advance a per-shard fence on grant and reject every manifest commit whose
+    epoch is not the current value.
+  twist_gold_refs: [g1, g2, g4]
+
+gold_rationale: |
+  Concrete timeline (g1, g2, g4): suppose W1 receives epoch 41. At 30 seconds
+  without renewal, the metadata transaction granting W2 increments the same
+  shard row to epoch 42. That grant itself makes 41 stale; it does not wait for
+  W2 to finish. W2's manifest update succeeds under `WHERE fence_epoch = 42`.
+  When W1 resumes at 90 seconds, its conditional update carries 41 and affects
+  zero rows because the authoritative value is 42. Thus W1 cannot overwrite W2
+  even if W2 has not yet published, a stronger guarantee than "reject an epoch
+  below the largest epoch previously seen on a write."
+
+  Why a lease check is insufficient (T1, T2): the failure detector cannot
+  distinguish a paused W1 from a dead one, so C3 requires granting W2. Once that
+  happens, no message can reliably revoke W1. A worker-side check has an open
+  interval before its write, and C4 explicitly permits the pause inside it.
+  Clock-skew margins only change the interval; they cannot remove it. The epoch
+  comparison must be in the same metadata transaction as the manifest mutation.
+
+  Publication safety (g3, g5, T3): content-addressed immutable outputs make a
+  retry idempotent or resumable. Readers follow only the committed manifest, so
+  a crash or stale rejection exposes nothing. Unreferenced files enter a
+  quarantine long enough for in-flight attempts to finish, then garbage
+  collection removes them. Rewriting live inputs would violate C2 before the
+  fencing decision even runs.
+
+  Liveness (g6): the 30-second lease still matters: it lets a distributed-lock or
+  leader-election mechanism replace a failed holder automatically. Fencing and
+  leasing solve different halves of the problem—leases permit takeover; fencing
+  makes takeover safe against the old holder.

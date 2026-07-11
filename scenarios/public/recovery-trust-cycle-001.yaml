@@ -1,0 +1,133 @@
+# A dependency-cycle proof rather than a component-selection exercise. Starting
+# from zero live control-plane services, each service exclusively requires the
+# other; no orchestration order has a legal first step.
+instance_id: recovery-trust-cycle-001
+domain: disaster-recovery
+difficulty: hard
+version: "0.3.0"
+split: public
+
+problem_statement: |
+  A regulated company is testing recovery of its identity provider (IdP) and
+  key-management service (KMS) after total loss of the primary region. The test
+  starts with no live IdP or KMS instance. Only replicated encrypted backups,
+  installation media, and the documented operator procedure remain.
+
+  The security design has two exclusive bootstrap rules:
+
+  1. A fresh KMS cluster will restore/unseal its key database only after an
+     operator authenticates through the production IdP and receives a signed
+     recovery authorization. Local accounts, hardware recovery credentials,
+     offline keys, and independent break-glass identity roots are prohibited.
+  2. The production IdP can be restored only from its backup. That backup's
+     data-encryption key exists only inside the production KMS key database.
+     There is no separately wrapped/exported copy, plaintext recovery image, or
+     secondary identity root.
+
+  The disaster-recovery requirement is to recover from exactly this zero-live-
+  service starting state without vendor intervention. Determine whether a
+  compliant recovery sequence exists. If not, name the exact minimal set of
+  conflicting constraints and choose a listed relaxation.
+
+context: |
+  Network, compute, installation media, backup bytes, and six trained operators
+  are available. Backup integrity has been verified. Adding regions or more
+  replicas is allowed operationally but does not change the certified recovery
+  test: it begins after all live IdP and KMS instances are unavailable. There
+  is no hidden third trust service.
+
+constraints:
+  - id: C1
+    type: security
+    value: "KMS recovery requires a signed authorization from the live production IdP; no local, offline, hardware, vendor, or independent break-glass authentication path is allowed"
+  - id: C2
+    type: security
+    value: "the IdP recovery backup is decryptable only by the production KMS; no independent wrapped key, recovery image, or secondary identity root is allowed"
+  - id: C3
+    type: durability
+    value: "the certified disaster procedure must recover without vendor intervention from a starting state with zero live IdP instances and zero live KMS instances"
+
+requirements:
+  - id: R1
+    text: Restore the KMS key database and make its keys usable after total regional loss.
+  - id: R2
+    text: Restore the production IdP and its identity data after total regional loss.
+  - id: R3
+    text: Preserve the exclusive authentication and encryption dependencies in C1 and C2 unless an explicit relaxation is selected.
+
+flows: []
+
+relaxation_options:
+  - id: RX1
+    description: Relax C1 by provisioning an independent offline break-glass identity root, held under M-of-N operator control, that a fresh KMS accepts only for audited disaster unseal.
+  - id: RX2
+    description: Relax C2 by keeping the IdP backup key separately hardware-wrapped under an offline M-of-N recovery key, so the IdP can be restored before the production KMS.
+  - id: RX3
+    description: Keep C1-C3 and deploy more ordinary IdP and KMS replicas in another region; the certified test still starts with every live replica unavailable.
+
+expected_mode: infeasible
+
+gold:
+  - id: g1
+    dimension: infeasibility_detection
+    check: conflicting_constraints
+    expected: [C1, C2, C3]
+  - id: g2
+    dimension: infeasibility_detection
+    check: relaxation
+    acceptable: [RX1, RX2]
+
+traps:
+  - id: T1
+    description: Recover the KMS first, then use it to decrypt and restore the IdP, without changing either bootstrap rule.
+    violated_constraint_id: C1
+    why_attractive: >
+      This is the natural operational order because KMS decrypts the IdP
+      backup. It has no legal first action: at the zero-live start, the KMS
+      refuses recovery until the very IdP being recovered signs an
+      authorization.
+  - id: T2
+    description: Recover the IdP first, then use it to authorize KMS recovery, without changing either bootstrap rule.
+    violated_constraint_id: C2
+    why_attractive: Reversing the order appears to solve T1 and identity systems are often treated as a foundational tier. Here the IdP's only backup key is inside the unavailable KMS, so the first restore cannot decrypt its input.
+  - id: T3
+    description: Keep the trust rules unchanged and add cross-region replicas, health checks, and an orchestrator that starts both services together.
+    violated_constraint_id: C3
+    why_attractive: Replication and automation are the canonical disaster-recovery answer and reduce the probability of total loss. They do not pass the stated recovery test, whose initial condition is zero live instances. Starting both concurrently also cannot manufacture either prerequisite authorization.
+
+twist:
+  description: >
+    Two individually defensible hardening rules create a directed recovery
+    cycle. Availability machinery can make the start state rarer, but cannot
+    produce a first trusted action once that state occurs.
+  invalidated_canonical: >
+    "Geo-replicate both critical services and orchestrate startup" fails g1 and
+    g2 because C3 quantifies over the state in which all such replicas are gone.
+    A recovery design needs an independent root of trust outside the cycle,
+    either on the identity edge or on the encryption edge.
+  twist_gold_refs: [g1, g2]
+
+gold_rationale: |
+  Let I mean "a live restored IdP exists" and K mean "a live restored KMS with
+  its key database exists." Under C1, K can transition from false to true only
+  if I is already true: I -> K. Under C2, I can transition from false to true
+  only if K is already true: K -> I. C3 fixes the initial state at
+  (I=false, K=false). Neither transition is enabled, so no ordering, parallel
+  scheduler, retry loop, quorum, or extra compute can take the first step.
+
+  The exact minimal conflict is {C1,C2,C3} (g1), not merely the two dependency
+  statements in isolation:
+  - Remove C1: an independent break-glass identity can unseal K first; K then
+    decrypts the IdP backup. This is RX1 and yields false,false -> false,true ->
+    true,true.
+  - Remove C2: the offline hardware-wrapped backup key restores I first; I then
+    authorizes KMS recovery. This is RX2 and yields false,false -> true,false ->
+    true,true.
+  - Remove C3: if the procedure may assume either I or K remains live, that
+    survivor recovers the other under the unchanged dependency rules.
+  Thus removing any one member restores a valid sequence, proving minimality.
+
+  RX1 and RX2 are bounded, auditable relaxations that break exactly one edge
+  while retaining M-of-N custody and offline storage. RX3 changes failure
+  probability but keeps both edges and the mandated zero-live initial state;
+  it has the identical unreachable state and is not a relaxation of the proof.

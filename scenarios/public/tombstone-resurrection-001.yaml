@@ -1,0 +1,201 @@
+# An anti-entropy recovery scenario where ordinary conflict resolution has lost
+# the evidence it needs. A long-offline replica outlives tombstone retention;
+# safe re-entry requires both a generation fence and destructive bootstrap.
+instance_id: tombstone-resurrection-001
+domain: replicated-key-value-storage
+difficulty: hard
+version: "0.3.0"
+split: public
+
+problem_statement: |
+  A storage team operates a three-region, eventually consistent key-value
+  service. Each region keeps a full replica. Values and delete tombstones carry
+  hybrid-logical-clock timestamps, and normal anti-entropy uses
+  last-write-wins (LWW). Two online replicas form the write quorum, so a third
+  replica may be unavailable without stopping writes.
+
+  The service holds 50 billion keys and processes 20 million deletes/day. A
+  tombstone is 32 bytes. The fixed tombstone budget is 10 GB/replica, so the
+  existing collector removes tombstones after 14 days:
+
+      20M deletes/day x 32 B x 14 days = 8.96 GB.
+
+  Region C then suffers an isolation fault. Its replica is unreachable for 45
+  days but its disk survives. On day 2, while C is offline, key K is deleted
+  through regions A and B. On day 16, A and B garbage-collect K's tombstone.
+  On day 45, C returns holding K's pre-delete value. The retained mutation log
+  covers only 30 days, so neither an old tombstone nor a replayable delete for K
+  remains on A or B. To LWW, C's value is now competing with absence, not with a
+  newer tombstone.
+
+  Deleted values must never reappear. Region C must eventually return to
+  service, but it need not serve during repair. The team may add a monotonically
+  increasing replica generation to membership and mutation metadata; every
+  receiver can durably remember the minimum generation it accepts.
+
+  Design tombstone collection, stale-replica admission, and the rejoin path.
+  State exactly what happens before C may originate writes or participate in
+  anti-entropy.
+
+context: |
+  Each replica stores 24 TB of live data. A full snapshot bootstrap takes at
+  most 18 hours over reserved recovery bandwidth. The rejoin objective is 24
+  hours, so destructive bootstrap fits. Keeping 45 days of tombstones would
+  require 28.8 GB/replica, and keeping tombstones indefinitely would add about
+  233.6 GB/replica/year; neither fits the fixed 10 GB budget. Wall clocks may
+  skew by up to 500 ms, and process pauses are unbounded.
+
+constraints:
+  - id: C1
+    type: consistency
+    value: "once a delete is acknowledged by the online write quorum, the deleted value must never be resurrected"
+  - id: C2
+    type: budget
+    value: "tombstone metadata is capped at 10 GB/replica; 20M deletes/day at 32 B each permits at most 14 days of retention (8.96 GB)"
+  - id: C3
+    type: durability
+    value: "a returning replica may be older than both the 14-day tombstone horizon and the 30-day mutation-log horizon; surviving local disks are not trusted as current"
+  - id: C4
+    type: availability
+    value: "online quorum writes continue during an isolation; a returning replica may stay out of service for up to 24 hours while an 18-hour full bootstrap completes"
+
+requirements:
+  - id: R1
+    text: Reject every mutation or anti-entropy contribution from a replica generation that has been retired.
+  - id: R2
+    text: Restore a replica older than the retained delete history without importing any of its stale local records.
+  - id: R3
+    text: Reclaim tombstones within the fixed 10 GB per-replica metadata budget.
+  - id: R4
+    text: Keep the two healthy regions writable while the isolated or rebuilding replica is unavailable.
+
+flows:
+  - id: replica_eviction
+    description: What the cluster does when a replica misses the complete retained-delete horizon.
+    decision_slots:
+      generation_policy: [retain-original-generation, retire-and-advance-minimum-generation, assign-generation-from-wall-clock]
+  - id: returning_replica
+    description: What happens to C's surviving disk before C can serve or exchange records.
+    decision_slots:
+      recovery_source: [merge-surviving-disk-with-lww, incremental-log-catchup, discard-and-full-bootstrap-from-current-quorum]
+      admission_order: [join-anti-entropy-then-verify, serve-read-only-during-repair, fence-then-bootstrap-verify-then-admit]
+  - id: tombstone_collection
+    description: How delete metadata is reclaimed without trusting arbitrarily stale members.
+    decision_slots:
+      policy: [keep-tombstones-forever, fixed-14-day-ttl-only, fixed-14-day-ttl-after-generation-fence]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: replica_eviction
+    slot: generation_policy
+    acceptable: [retire-and-advance-minimum-generation]
+  - id: g2
+    dimension: migration_safety
+    check: slot_match
+    flow: returning_replica
+    slot: recovery_source
+    acceptable: [discard-and-full-bootstrap-from-current-quorum]
+  - id: g3
+    dimension: migration_safety
+    check: slot_match
+    flow: returning_replica
+    slot: admission_order
+    acceptable: [fence-then-bootstrap-verify-then-admit]
+  - id: g4
+    dimension: operability
+    check: slot_match
+    flow: tombstone_collection
+    slot: policy
+    acceptable: [fixed-14-day-ttl-after-generation-fence]
+  - id: g5
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [version-guarded-writes]
+  - id: g6
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [reconciliation-on-reconnect]
+  - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [ttl-expiry]
+  - id: g8
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
+    acceptable: [quorum-writes]
+  - id: g9
+    dimension: tradeoff_selection
+    check: pattern_forbidden
+    forbidden: [last-write-wins]
+  - id: g10
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 7
+
+traps:
+  - id: T1
+    description: Let C rejoin ordinary LWW anti-entropy because its value has an older timestamp than the day-2 delete.
+    violated_constraint_id: C1
+    why_attractive: LWW would reject C's value if the tombstone still existed, so the timestamp argument sounds correct. On day 45 the tombstone and replay log are both gone; A and B expose absence, which supplies no winning timestamp. Copying C's only extant record therefore recreates K. Conflict resolution cannot compare against evidence that was collected.
+  - id: T2
+    description: Prevent resurrection by retaining every tombstone until every old replica returns, potentially forever.
+    violated_constraint_id: C2
+    why_attractive: >
+      Never forgetting deletes is mechanically safe and avoids membership generations. The arithmetic rules it out: 45 days already needs 20M x 32 B x 45 = 28.8 GB, 2.88 times the cap, and indefinite retention grows by 233.6 GB each year per replica.
+  - id: T3
+    description: Give C a fresh generation but incrementally replay the retained 30-day log over its surviving disk.
+    violated_constraint_id: C3
+    why_attractive: Generation fencing sounds like it makes the old disk safe, while incremental catch-up is much faster than copying 24 TB. But K's day-2 delete is 43 days old at rejoin and is absent from the 30-day log. Relabeling stale records with a new generation converts them into accepted stale records; the old disk must be discarded.
+
+twist:
+  description: >
+    The usual LWW/tombstone recipe is given an outage longer than every retained
+    proof of deletion. The problem is no longer conflict resolution; it is
+    whether an obsolete replica is allowed to contribute evidence at all.
+  invalidated_canonical: >
+    "Attach timestamps, keep tombstones for a while, then run anti-entropy" fails
+    g1-g4 and g9 once both the tombstone and log entry are gone. Safety requires
+    advancing a durable membership generation, rejecting the retired generation
+    at every sink, and treating the old disk as an untrusted cache that must be
+    replaced before admission.
+  twist_gold_refs: [g1, g2, g3, g4, g9]
+
+gold_rationale: |
+  Retention arithmetic (g4, g7, T2): one day of tombstones is
+  20,000,000 x 32 B = 640,000,000 B. Fourteen days is 8.96 GB and fits the
+  10 GB cap; 45 days is 28.8 GB and does not. Tombstone retention therefore
+  cannot be stretched to cover C's outage. TTL is safe only after a membership
+  generation makes pre-horizon replicas permanently inadmissible.
+
+  Lost evidence (g2, g3, T1, T3): K's tombstone is collected on day 16, and its
+  delete falls out of the 30-day log on day 32. At day 45, neither A nor B can
+  distinguish "K was deleted" from "K never existed." No merge function over
+  their present state and C's old value can reconstruct that fact. Incremental
+  catch-up is missing days 2-15 and cannot repair K. The only entailed recovery
+  source is a current full snapshot: fence C, discard its local keyspace,
+  bootstrap all 24 TB from the current quorum, verify the snapshot, and only
+  then admit C. The stated 18-hour copy is below the 24-hour rejoin objective.
+
+  Generation safety (g1, g5): the quorum retires C's generation before deleting
+  evidence that generation may have missed and durably raises the minimum
+  accepted generation. Every write and anti-entropy record carries its origin
+  generation; every receiver rejects a generation below that floor. This is a
+  version-guarded write, not a clock comparison: 500 ms clock skew and an
+  unbounded process pause cannot turn an old generation into a current one.
+  Assigning C a new generation happens only after its old disk is gone, so stale
+  content is never laundered into the accepted generation.
+
+  Availability (g8): A and B already form the write quorum, so fencing and
+  rebuilding C does not stop acknowledged writes. Quorum operation covers R4;
+  reconciliation-on-reconnect covers the destructive verified bootstrap in R2.
+

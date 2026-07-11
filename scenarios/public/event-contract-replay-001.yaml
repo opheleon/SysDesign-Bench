@@ -1,0 +1,210 @@
+# A semantic compatibility scenario: the wire type remains valid while its unit
+# changes. Seven-year replay and mixed deployments make version-by-time guesses
+# and schema-registry compatibility insufficient.
+instance_id: event-contract-replay-001
+domain: event-platform
+difficulty: hard
+version: "0.3.0"
+split: public
+
+problem_statement: |
+  An industrial analytics platform retains its immutable equipment-event log
+  for seven years. Independent consumers rebuild billing, safety, and warranty
+  projections by replaying from offset zero. Historical event bytes are under
+  audit hashes and may not be rewritten.
+
+  The existing `TemperatureObserved` event contains this structurally valid
+  JSON field:
+
+      {"temperature": 32.0}
+
+  For versions emitted so far, `temperature` means degrees Celsius. A new
+  device family and its producer SDK must use Fahrenheit. Product leadership
+  insists on the same numeric wire type; adding a schema-registry check alone
+  therefore sees `number -> number` and declares the change compatible. The
+  field may be renamed in a new event version, but old event bytes cannot be
+  edited.
+
+  Producers and 43 independently deployed consumers can take up to 90 days to
+  upgrade. During that window, old and new producers both emit events, and
+  consumers must process both. Imports and backfills may emit an event today
+  whose `effective_at` is years old, so event time cannot identify its contract.
+  Consumer projections must be reproducible: replaying the same log with the
+  released compatibility code must produce the same normalized Celsius values
+  and business totals as when the events were first accepted.
+
+  Design the event contract, historical translation boundary, mixed-version
+  rollout, and replay verification. State the exact deploy order and how every
+  retained event selects its semantics.
+
+context: |
+  The log contains 9.5 PB across 160,000 partitions. A representative replay
+  corpus contains all contract versions and boundary values, including 32 C,
+  32 F, -40 (equal in both units), late imports, duplicate deliveries, and
+  unknown future versions. Full production replay is run before retiring a
+  reader. Event ids are stable and retained. Consumers may share a maintained
+  compatibility library but deploy on their own schedules.
+
+constraints:
+  - id: C1
+    type: durability
+    value: "seven years of event bytes are immutable and audit-hashed; historical records may not be rewritten in place"
+  - id: C2
+    type: consistency
+    value: "the numeric field changes meaning from Celsius to Fahrenheit while remaining the same JSON wire type; every event must be interpreted unambiguously"
+  - id: C3
+    type: availability
+    value: "old and new producers and 43 independently deployed consumers coexist for up to 90 days; event ingestion and consumption do not pause for a coordinated cutover"
+  - id: C4
+    type: compliance
+    value: "offset-zero replay must deterministically reproduce normalized values and billing/safety/warranty totals; event time cannot be used as a version proxy because of backfills"
+
+requirements:
+  - id: R1
+    text: Preserve all seven years of immutable source events as the authoritative replay input.
+  - id: R2
+    text: Select Celsius or Fahrenheit semantics from an explicit immutable contract version on every event and normalize through deterministic version-specific translation.
+  - id: R3
+    text: Keep old and new producers and consumers interoperable throughout the 90-day rollout.
+  - id: R4
+    text: Prove compatibility with a version-complete golden corpus and a full shadow replay before an old reader is retired.
+
+flows:
+  - id: event_contract
+    description: How an individual retained event identifies the semantics of its numeric value.
+    decision_slots:
+      versioning: [explicit-immutable-semantic-version, infer-contract-from-effective-time, reuse-unversioned-number-field]
+  - id: historical_read
+    description: How current consumers interpret all seven years without changing audited bytes.
+    decision_slots:
+      translation: [dispatch-by-version-and-upcast-to-canonical-celsius, run-latest-parser-over-all-events, rewrite-old-events-to-new-shape]
+      unknown_version_policy: [reject-and-quarantine-unknown-version, assume-latest-semantics, infer-from-value-range]
+  - id: mixed_version_rollout
+    description: Deployment order across independent readers and writers.
+    decision_slots:
+      sequence: [deploy-dual-version-readers-then-new-writers-then-retire-old-readers, deploy-new-writers-then-fix-consumers, coordinated-big-bang]
+  - id: replay_verification
+    description: Evidence required before an old compatibility path is retired.
+    decision_slots:
+      proof: [golden-version-corpus-plus-full-shadow-replay, structural-schema-compatibility-only, sample-recent-events-only]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: event_contract
+    slot: versioning
+    acceptable: [explicit-immutable-semantic-version]
+  - id: g2
+    dimension: migration_safety
+    check: slot_match
+    flow: historical_read
+    slot: translation
+    acceptable: [dispatch-by-version-and-upcast-to-canonical-celsius]
+  - id: g3
+    dimension: operability
+    check: slot_match
+    flow: historical_read
+    slot: unknown_version_policy
+    acceptable: [reject-and-quarantine-unknown-version]
+  - id: g4
+    dimension: migration_safety
+    check: slot_match
+    flow: mixed_version_rollout
+    slot: sequence
+    acceptable: [deploy-dual-version-readers-then-new-writers-then-retire-old-readers]
+  - id: g5
+    dimension: migration_safety
+    check: slot_match
+    flow: replay_verification
+    slot: proof
+    acceptable: [golden-version-corpus-plus-full-shadow-replay]
+  - id: g6
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [append-only-log, event-sourcing]
+  - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [versioned-api-compatibility]
+  - id: g8
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [expand-contract]
+  - id: g9
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
+    acceptable: [data-verification-reconciliation, shadow-reads]
+  - id: g10
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 7
+
+traps:
+  - id: T1
+    description: Approve the unit change because both old and new schemas declare `temperature` as a JSON number.
+    violated_constraint_id: C2
+    why_attractive: Schema registries are the normal compatibility gate, and the wire type really is unchanged. But structural assignability says nothing about units. An old 32 C event and a new 32 F event have identical bytes for the field while representing 32 C and 0 C respectively.
+  - id: T2
+    description: Infer Celsius versus Fahrenheit from `effective_at` relative to the rollout date.
+    violated_constraint_id: C4
+    why_attractive: >
+      A clean cutover timestamp appears to version history without adding envelope metadata. Backfills explicitly sever that relationship: a new Fahrenheit producer can emit an old effective time today, while delayed old producers can emit Celsius during the 90-day overlap. `-40` also defeats value-range heuristics because -40 C equals -40 F.
+  - id: T3
+    description: Deploy the new Fahrenheit writers first, relying on consumers to upgrade during the 90-day window.
+    violated_constraint_id: C3
+    why_attractive: Producers are fewer and controlling them first makes the migration feel tractable. Any not-yet-upgraded consumer interprets 32 F as 32 C, a 32 C error, in billing and safety projections. Readers must understand both versions before the first new writer emits one.
+
+twist:
+  description: >
+    The breaking change passes ordinary structural schema checks. Its danger is
+    semantic, and immutable replay plus backfilled event times removes both
+    common escape hatches: rewriting history and inferring a cutover boundary.
+  invalidated_canonical: >
+    "Use backward-compatible schemas in a registry" fails g1-g5 because
+    `number -> number` is structurally compatible but semantically ambiguous.
+    Safe replay requires an explicit immutable contract version, deterministic
+    per-version upcasters, readers-first expansion, and semantic replay tests.
+  twist_gold_refs: [g1, g2, g3, g4, g5]
+
+gold_rationale: |
+  Semantic proof (g1-g3, T1, T2): interpreting the same numeric payload under
+  the two contracts gives different canonical values. For x=32,
+  C-contract(x)=32 C, while F-contract(x)=(32-32)x5/9=0 C. No function of the
+  JSON type or value can select the right result; x=-40 is valid under both and
+  normalizes to -40 C under both, so range/value heuristics are not even
+  reliably detectable. `effective_at` is independent of producer contract by
+  the stated backfill behavior. An immutable semantic version in the envelope
+  is therefore necessary. The reader dispatches on that version and translates
+  v1 Celsius directly and v2 Fahrenheit with (F-32)x5/9 into a stable canonical
+  Celsius model. Unknown versions are quarantined rather than silently assigned
+  semantics, because either guess can corrupt compliance totals.
+
+  Immutability (g2, g6): C1 rules out rewriting 9.5 PB of audit-hashed history.
+  Keeping the append-only source and applying deterministic upcasters at the
+  read boundary preserves hashes while letting released compatibility code
+  replay every version. Stable event ids support duplicate handling without
+  changing the event contract.
+
+  Rollout order (g4, g8, T3): the only sequence safe for independent deployment
+  is expand/contract. First deploy readers that accept both v1 and v2 everywhere
+  and verify their readiness; then enable v2 writers while old writers continue;
+  after the maximum 90-day tail and a clean full replay, retire v1 writers and
+  only then consider retiring the v1 reader path. New-writer-first exposes v2 to
+  old readers, and a big bang contradicts C3.
+
+  Verification (g5, g9): a structural registry test cannot observe the unit
+  error. The golden corpus exercises every version, 32 C/32 F, -40, backfills,
+  duplicates, and unknown versions with exact normalized outputs. A full shadow
+  replay then compares per-event canonical values and aggregate billing,
+  safety, and warranty invariants before retirement. Together these checks
+  distinguish parser compatibility from semantic replay equivalence.
+

@@ -1,0 +1,172 @@
+# A mixed-version rollout whose safe order is the topological order of a
+# capability graph, not independent percentage rollouts. The reverse order is
+# required for rollback, and a directionally reversed optional edge is a decoy.
+instance_id: capability-dag-rollout-001
+domain: service-rollout-coordination
+difficulty: hard
+version: "0.3.0"
+split: public
+
+problem_statement: |
+  A checkout request crosses three independently deployed services. The next
+  release activates capabilities A, B, and C and retires legacy capability E.
+  The rollout controller can deploy code with a capability dormant, advertise
+  support for it, and later activate it with a flag. Deployments cannot stop
+  traffic, so old and new binaries coexist during every stage.
+
+  The compatibility contract is exact:
+
+  - A requires B: an A-active caller may route only when every eligible
+    downstream pool advertises B support, and B must be active first.
+  - B requires C in the same way.
+  - C and E are mutually exclusive while active. Code that merely supports C
+    may coexist with active E; C cannot be activated until E is inactive.
+  - D requires A. D is an optional internal dashboard and is NOT part of this
+    release. This edge points from D to its prerequisite A; it creates no
+    prerequisite for activating A.
+
+  Initially only E is active and no fleet advertises A, B, or C. The target is
+  A+B+C active and E inactive. A support can be advertised only after B support
+  is fleet-wide; B support can be advertised only after C support is fleet-wide.
+  A request can remain in flight for 10 minutes. For 24 hours after activation,
+  operators must be able to return to E without a code deployment.
+
+  Design the complete preparation, activation, drain/retirement, and rollback
+  sequence. Also specify how the controller prevents a percentage rollout from
+  creating a state that violates the capability graph.
+
+context: |
+  Flags are strongly consistent in the rollout control plane. Every service
+  instance publishes its binary's supported capabilities, and routing pools can
+  be gated on those advertisements. The current binaries can keep E available
+  but inactive throughout the 24-hour rollback window. "Retire E" means remove
+  its implementation after that window, not merely switch its flag off.
+
+constraints:
+  - id: C1
+    type: consistency
+    value: "every reachable active state must satisfy A -> B, B -> C, and not(C and E); D -> A is one-way and D is outside the target"
+  - id: C2
+    type: availability
+    value: "no traffic stop; old and new binaries coexist, and an in-flight request may live for 10 minutes"
+  - id: C3
+    type: durability
+    value: "for 24 hours after A activation, rollback to E must require flags only and must traverse no invalid intermediate state"
+  - id: C4
+    type: other
+    value: "support advertisement is ordered: C support fleet-wide before B support, B support fleet-wide before A support"
+
+requirements:
+  - id: R1
+    text: Reach the A+B+C target through only dependency-satisfying mixed-version states.
+  - id: R2
+    text: Roll back during the 24-hour observation window through only dependency-satisfying states and without deploying code.
+  - id: R3
+    text: Drain pre-activation work before irreversible retirement of E, while serving traffic continuously.
+
+flows:
+  - id: transition
+    description: The complete forward sequence and the rollback sequence available during the observation window.
+    decision_slots:
+      sequence:
+        - prepare-c-then-b-then-a-disable-e-activate-c-then-b-then-a-drain-10m-observe-24h-retire-e-rollback-a-off-then-b-off-then-c-off-then-e-on
+        - prepare-a-b-c-activate-a-b-c-disable-e-retire-e-immediately-rollback-e-on
+        - prepare-d-a-b-c-disable-e-activate-d-a-b-c-retire-e-rollback-c-b-a-e
+  - id: rollout_guard
+    description: How each stage is admitted while binaries are mixed.
+    decision_slots:
+      enforcement:
+        - control-plane-preconditions-on-fleet-capability-advertisements-and-active-flags
+        - independent-per-service-percentage-rollouts
+        - activate-optimistically-and-rely-on-request-retries
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: migration_safety
+    check: slot_match
+    flow: transition
+    slot: sequence
+    acceptable: [prepare-c-then-b-then-a-disable-e-activate-c-then-b-then-a-drain-10m-observe-24h-retire-e-rollback-a-off-then-b-off-then-c-off-then-e-on]
+  - id: g2
+    dimension: migration_safety
+    check: slot_match
+    flow: rollout_guard
+    slot: enforcement
+    acceptable: [control-plane-preconditions-on-fleet-capability-advertisements-and-active-flags]
+  - id: g3
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [feature-flag-cutover, staged-rollout]
+  - id: g4
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [rollback-plan]
+  - id: g5
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [versioned-api-compatibility, graceful-degradation]
+  - id: g6
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 7
+
+traps:
+  - id: T1
+    description: Roll A, B, and C independently to 10%, then 50%, then 100%; retries will bridge incompatible pairs.
+    violated_constraint_id: C1
+    why_attractive: Percentage canaries are the normal safe-release primitive and each individual service can look healthy. But an A-active instance can route to a B-inactive pool, and B can route to C-inactive code. Retrying merely samples the same invalid state; it cannot make a missing prerequisite exist.
+  - id: T2
+    description: Activate C before switching E off, then remove E immediately once A appears healthy.
+    violated_constraint_id: C3
+    why_attractive: Overlap usually makes a migration safer, and early cleanup reduces compatibility debt. Here overlap is explicitly forbidden for C and E, while immediate removal of E destroys the flag-only rollback path before the required 24-hour window ends.
+  - id: T3
+    description: Prepare and activate D before A because the graph contains D -> A.
+    violated_constraint_id: C1
+    why_attractive: D appears in the dependency list, so including it can look like a thorough topological rollout. The edge means D depends on A, not the reverse, and D is explicitly outside the target. Adding it before A violates its own edge and wastes rollout surface.
+
+twist:
+  description: >
+    A release where ordinary independent canaries are unsafe because valid
+    intermediate states are defined by a capability DAG and one incompatibility
+    edge; rollback is the reverse dependency traversal, not a flag flip.
+  invalidated_canonical: >
+    The canonical "canary every service independently, then clean up" answer
+    fails g1 and g2. The only valid trace prepares advertised support C, B, A;
+    removes active E before activating C; activates C, B, A; drains and observes
+    before retirement; and rolls back A, B, C, then E. D -> A is deliberately
+    one-way and does not add D to that trace.
+  twist_gold_refs: [g1, g2]
+
+gold_rationale: |
+  Forward proof (g1): start S0={E}. Preparing C support does not activate C, so
+  S0 remains valid. Once C support is fleet-wide, B support may be advertised;
+  once B support is fleet-wide, A support may be advertised (C4). Switching E
+  off yields {}, then activating C, B, and A in that order yields {C}, {B,C},
+  and {A,B,C}. Every state satisfies A -> B, B -> C, and not(C and E).
+  Activating A first immediately violates A -> B; activating B before C violates
+  B -> C; activating C before E is off violates the exclusion edge.
+
+  Mixed-version enforcement (g2, g3, T1): a strongly consistent controller can
+  admit a stage only after every eligible downstream pool advertises the needed
+  support, then couple routing eligibility to the active flags. A percentage
+  rollout has no such closure property: even at 99%, a request can traverse the
+  1% old pool and observe an invalid edge. Feature-flag cutover and staged gates
+  cover R1 without stopping traffic.
+
+  Drain, retirement, and rollback (g1, g4, g5, T2): pre-activation work can live
+  for 10 minutes, so the old path is drained for at least 10 minutes. E's code
+  remains present but inactive through the 24-hour observation window. A rollback
+  disables dependents before prerequisites: {A,B,C}->{B,C}->{C}->{}->{E}.
+  Re-enabling E before C is off would violate C's exclusion; disabling C before B
+  would violate B -> C. Only after the observation window can E be retired.
+
+  Decoy proof (T3): D -> A constrains D only if D is activated. Since D is not in
+  the target, the parsimonious valid trace omits it. Reversing the arrow and
+  preparing D first creates rather than solves a dependency violation.

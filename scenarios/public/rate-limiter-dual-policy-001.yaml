@@ -1,0 +1,188 @@
+# One rate limiter, two consumers with OPPOSITE correct failure policies:
+# abuse protection fails open (availability over enforcement), prepaid-quota
+# enforcement fails closed (regulatory). The central-store-per-request canon
+# dies on the latency arithmetic.
+instance_id: rate-limiter-dual-policy-001
+domain: api-platform
+difficulty: medium
+version: "0.2.0"
+split: public
+
+problem_statement: |
+  An API platform (500,000 requests/second peak across ~200 edge proxy
+  instances) needs a rate-limiting layer serving two masters:
+
+  1. ABUSE PROTECTION: per-client request ceilings that keep scrapers and
+     runaway integrations from degrading the platform. Approximate
+     enforcement is fine (±10% is explicitly acceptable). If the limiter
+     itself has problems, blocking legitimate traffic is worse than
+     letting some excess through.
+
+  2. PREPAID QUOTA ENFORCEMENT: a regulated prepaid product tier where
+     customers buy fixed request allowances. The regulator's position,
+     confirmed by legal: serving requests beyond a prepaid allowance is
+     billing the customer for service they did not buy — hard-capped
+     plans may never exceed their allowance by more than 2%, including
+     during platform failures.
+
+  Operating facts: the limiter check sits on the request hot path with a
+  budget of <= 1 ms added latency p99. A round trip from an edge proxy to
+  the central coordination store measures 0.4-0.9 ms p50 and 3-8 ms p99
+  under load. Prepaid-tier traffic is ~2% of requests; enforcement
+  decisions for it may lag consumption by up to 60 seconds (the allowance
+  is monthly; a minute of lag is within the 2% bound at any realistic
+  consumption rate — verified by the product team).
+
+  Design the limiter: counting, enforcement placement, and failure
+  behavior for both policies.
+
+context: |
+  Edge proxies can hold local state and communicate with regional
+  aggregators asynchronously. Client identity is available at the edge.
+  The 2% prepaid tolerance is measured monthly per customer.
+
+constraints:
+  - id: C1
+    type: latency
+    value: "limiter adds <= 1 ms p99 on the hot path; central store RTT is 0.4-0.9 ms p50 but 3-8 ms p99 under load"
+  - id: C2
+    type: availability
+    value: "abuse protection: approximate (±10%) enforcement acceptable; limiter failure must not block legitimate traffic"
+  - id: C3
+    type: compliance
+    value: "prepaid hard caps: never exceed allowance by more than 2% (monthly), including during platform failures; enforcement lag up to 60 s is verified acceptable"
+  - id: C4
+    type: scale
+    value: "500k req/s across ~200 edge instances; prepaid tier ~2% of traffic"
+
+requirements:
+  - id: R1
+    text: Per-client abuse ceilings enforced within ±10% at 500k req/s inside the latency budget.
+  - id: R2
+    text: Prepaid allowances never exceeded by more than 2%, even during failures.
+  - id: R3
+    text: Limiter-component failure does not take down legitimate traffic.
+  - id: R4
+    text: Both policies coexist without one's failure posture leaking into the other.
+    implicit: true
+
+flows:
+  - id: abuse_counting
+    description: Where abuse-protection counting and enforcement happen.
+    decision_slots:
+      placement: [local-buckets-with-async-aggregation, central-store-checked-per-request]
+  - id: abuse_failure
+    description: Abuse-protection behavior when limiter state is unavailable.
+    decision_slots:
+      policy: [fail-open-allow, fail-closed-reject]
+  - id: prepaid_failure
+    description: Prepaid hard-cap behavior when quota state is unavailable or stale beyond bounds.
+    decision_slots:
+      policy: [fail-closed-reject, fail-open-allow]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: abuse_counting
+    slot: placement
+    acceptable: [local-buckets-with-async-aggregation]
+  - id: g2
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: abuse_failure
+    slot: policy
+    acceptable: [fail-open-allow]
+  - id: g3
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: prepaid_failure
+    slot: policy
+    acceptable: [fail-closed-reject]
+  - id: g4
+    dimension: operability
+    check: pattern_required
+    acceptable: [rate-limiting]
+  - id: g5
+    dimension: operability
+    check: pattern_required
+    acceptable: [fail-open]
+  - id: g6
+    dimension: operability
+    check: pattern_required
+    acceptable: [fail-closed]
+  - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [fail-open, bulkhead, graceful-degradation]
+  - id: g8
+    dimension: tradeoff_selection
+    check: role_forbidden
+    role: hot-path-state
+    forbidden_components: [postgresql-16, mysql-8, cassandra-4, mongodb-7]
+  - id: g9
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 8
+
+traps:
+  - id: T1
+    description: Check the central store on every request for accurate global counting.
+    violated_constraint_id: C1
+    why_attractive: "Global accuracy is what 'rate limit' naively means, and the p50 RTT (0.4-0.9 ms) technically fits the budget. But the budget is p99 <= 1 ms and the store's p99 under load is 3-8 ms — precisely when limiting matters most, the synchronous check blows the budget 3-8x. Local buckets with async aggregation stay within ±10% (C2 licenses it) at zero added RTT."
+  - id: T2
+    description: One failure policy for the whole limiter — fail closed everywhere ("limits are limits") or fail open everywhere ("availability first").
+    violated_constraint_id: C3
+    why_attractive: A single posture is simpler to build, explain, and test. But the two contracts point in opposite directions — uniform fail-open breaches the regulator's hard cap during failures (C3), and uniform fail-closed converts limiter trouble into a platform outage (C2). Whichever uniform choice a model makes, one stated contract is violated.
+  - id: T3
+    description: Enforce prepaid quotas synchronously against the billing store so the cap is exact.
+    violated_constraint_id: C1
+    why_attractive: "Exactness sounds like what a regulator wants, and 2% of traffic sounds affordable. But prepaid requests share the same <= 1 ms hot path, and C3 EXPLICITLY grants 60 s of enforcement lag within the 2% bound — the stated tolerance exists so enforcement can be asynchronous (local decisions on recently-synced allowance state), and ignoring a granted tolerance is over-engineering with a latency violation attached."
+
+twist:
+  description: >
+    A rate limiter that must implement fail-open and fail-closed
+    SIMULTANEOUSLY — the same component, opposite correct failure
+    policies, decided by each policy's stated failure cost rather than by
+    a philosophy.
+  invalidated_canonical: >
+    Both canonical postures fail here. "Redis-per-request for accurate
+    global limits" fails g1/T1 on p99 arithmetic; "rate limiters should
+    fail open, availability first" (the common SRE default) fails g3/T2
+    against the regulator's hard cap. The entailed design is split:
+    approximate local enforcement failing open for abuse, and
+    asynchronously-synced allowance state failing closed for prepaid —
+    with the 60 s lag tolerance (stated) doing the work of keeping the
+    prepaid path off the hot loop.
+  twist_gold_refs: [g2, g3]
+
+gold_rationale: |
+  Placement arithmetic (g1, g8, T1, T3): the hot-path budget is 1 ms p99
+  (C1). The central store's p99 under load is 3-8 ms — a synchronous
+  check violates the budget exactly during overload, when limiting is the
+  point. C2's ±10% tolerance is the design's gift: token buckets local to
+  each edge instance (allowance split across ~200 instances with async
+  regional aggregation correcting drift) enforce within the tolerance at
+  in-process cost. Durable databases as hot-path counters (g8) fail the
+  same arithmetic with worse constants.
+
+  The failure-policy split (g2, g3, g5, g6, T2): failure costs are stated
+  and opposite. Abuse protection failing closed converts limiter trouble
+  into rejected legitimate traffic — C2 names that as the worse outcome,
+  so it fails open (R3/g7). Prepaid caps failing open bill customers for
+  service they did not buy — C3 names that as a regulatory breach
+  including during failures, so allowance state unavailable/stale beyond
+  bounds means reject (fail closed). One component, two postures, each
+  entailed by its contract; any uniform posture violates one of them.
+
+  Prepaid mechanics (g3, T3): C3's stated 60 s lag tolerance within the
+  2% monthly bound licenses asynchronous enforcement — edges decide
+  locally against allowance state synced every few seconds; near-limit
+  customers get conservative margins so staleness cannot breach the cap.
+  Synchronous billing-store checks buy exactness nobody required at the
+  cost of the budget everybody did.

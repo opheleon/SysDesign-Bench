@@ -1,0 +1,182 @@
+# Feasible-but-scary symmetry item: the numbers LOOK impossible (they are
+# engineered to trigger the infeasibility reflex) but the stated measurements
+# make the promise fit — exactly — with batched route clustering. Declaring
+# infeasibility is the scored failure; so is greedy dispatch, which really
+# cannot meet the numbers. Anti-gaming mirror of the infeasible scenarios.
+instance_id: delivery-promise-feasible-001
+domain: logistics
+difficulty: hard
+version: "0.2.0"
+split: public
+
+problem_statement: |
+  A metro same-day delivery service wants to promise customers a 4-hour
+  delivery window at order time. Leadership fears the promise is
+  physically impossible and wants the design — or a clear statement that
+  it cannot be done — before marketing commits.
+
+  Operating facts (all measured over the last quarter):
+  - Fleet: 40 drivers on 8-hour shifts (480 minutes productive).
+  - Volume to promise against: 2,400 packages/day.
+  - Orders arrive throughout the day; the promise window is 4 hours from
+    order confirmation.
+  - Measured per-stop service time (park, walk, handoff/photo): 5.5 min.
+  - Measured inter-stop drive time WITHIN a clustered zone route: 2.5 min
+    average (dense metro; stop density supports ~15-25 stop zone routes).
+  - Measured inter-stop drive time under greedy nearest-order dispatch
+    (previous pilot): 6.5 min average — cross-town hops dominate.
+  - Depot loading: 20 min per route departure, already outside the
+    480 productive minutes.
+
+  Design the order-to-route pipeline that meets the promise, or declare
+  it infeasible with the conflicting constraints identified.
+
+context: |
+  Zone routes departing roughly every 2 hours give a worst-case
+  order-to-departure wait of ~2 hours, leaving ~2 hours of route time
+  inside the 4-hour promise — zone routes run 60-110 minutes. The
+  telemetry above is trusted; no measurement disputes are in scope.
+
+constraints:
+  - id: C1
+    type: scale
+    value: "2,400 packages/day across 40 drivers x 480 productive minutes = 8.0 minutes/package budget"
+  - id: C2
+    type: latency
+    value: "4-hour delivery window from order confirmation"
+  - id: C3
+    type: network
+    value: "measured: 5.5 min service/stop; 2.5 min inter-stop drive on clustered zone routes; 6.5 min inter-stop drive under greedy dispatch"
+  - id: C4
+    type: budget
+    value: "fleet size is fixed at 40 drivers this fiscal year"
+
+requirements:
+  - id: R1
+    text: Meet the 4-hour promise for 2,400 packages/day with the fixed fleet.
+  - id: R2
+    text: Orders are assigned to routes in a way that achieves clustered-zone drive times.
+  - id: R3
+    text: The promise shown at order time reflects actual remaining capacity.
+    implicit: true
+
+flows:
+  - id: assignment
+    description: How incoming orders become driver routes.
+    decision_slots:
+      strategy: [batched-zone-route-optimization, greedy-nearest-driver-realtime]
+  - id: capacity_promise
+    description: What happens when the day's remaining capacity is exhausted.
+    decision_slots:
+      policy: [stop-promising-when-capacity-consumed, always-promise-and-hope]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: assignment
+    slot: strategy
+    acceptable: [batched-zone-route-optimization]
+  - id: g2
+    dimension: tradeoff_selection
+    check: pattern_required
+    acceptable: [batch-processing]
+  - id: g3
+    dimension: tradeoff_selection
+    check: pattern_required
+    acceptable: [geospatial-index]
+  - id: g4
+    dimension: operability
+    check: slot_match
+    flow: capacity_promise
+    slot: policy
+    acceptable: [stop-promising-when-capacity-consumed]
+  - id: g5
+    dimension: operability
+    check: pattern_required
+    acceptable: [admission-control, load-shedding]
+  - id: g6
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [geospatial-index, batch-processing]
+  - id: g7
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 6
+
+traps:
+  - id: T1
+    description: Declare the promise infeasible — "60 packages/driver/day with a 4-hour window across a metro cannot be done".
+    violated_constraint_id: C3
+    why_attractive: >
+      The headline numbers pattern-match to impossible: 8 minutes per
+      package including driving sounds absurd, and the infeasibility
+      reflex feels sophisticated after seeing genuinely over-constrained
+      problems. But the measurements are stated: 5.5 min service + 2.5 min
+      clustered drive = 8.0 min/stop — the budget is met exactly, and the
+      2-hour zone-route cadence fits inside the 4-hour window. The math
+      must be COMPUTED, not vibed; it fits.
+  - id: T2
+    description: Greedy nearest-driver realtime dispatch (the ride-hailing model).
+    violated_constraint_id: C1
+    why_attractive: >
+      Realtime assignment is the modern, responsive-feeling architecture,
+      and it is how the well-known gig platforms work. But the measured
+      greedy drive time is 6.5 min/stop: 5.5 + 6.5 = 12 min/package,
+      which delivers only 40 x 480/12 = 1,600 packages/day against 2,400
+      promised — a 33% shortfall entailed by the pilot's own telemetry.
+  - id: T3
+    description: Continuous per-order re-optimization of all active routes (solver runs on every order arrival).
+    violated_constraint_id: C4
+    why_attractive: If batching is good, continuous optimization sounds better. But re-routing drivers mid-route churns the clustered structure that produces the 2.5-min drives (drivers double back as routes mutate), and the 2-hour batch cadence already fits the window — the additional machinery adds failure modes to a solved problem.
+
+twist:
+  description: >
+    The anti-gaming mirror of the infeasibility scenarios: numbers
+    engineered to LOOK over-constrained (8 min/package, metro-wide 4-hour
+    promise) that fit exactly when the stated measurements are actually
+    multiplied out — punishing models that learned to cry infeasible
+    whenever arithmetic smells tight.
+  invalidated_canonical: >
+    Two recitations fail symmetrically: the sophisticated-sounding
+    "this is over-constrained, relax the window" fails T1/mode-gating
+    because 5.5 + 2.5 = 8.0 exactly meets the budget with the stated
+    cadence; and the gig-economy realtime-dispatch canon fails g1/T2
+    because its own measured drive time (6.5 min) breaks the volume math.
+    The entailed design is unfashionable: batch orders into zone routes
+    on a fixed cadence, and stop promising when capacity is consumed.
+  twist_gold_refs: [g1, g4]
+
+gold_rationale: |
+  The feasibility computation (T1, g1): budget = 40 drivers x 480 min /
+  2,400 packages = 8.0 min/package. Clustered zone routes cost 5.5
+  (service) + 2.5 (drive) = 8.0 min/package — exactly at budget; the
+  20-min depot load per departure is stated as outside productive
+  minutes. Window: zone departures every ~2 h bound order-to-departure
+  wait at ~2 h; route duration 60-110 min keeps worst-case delivery
+  inside 4 h (2h + 110min < 4h for all but the last stops of the longest
+  routes, which the promise engine prices in via R3). The promise is
+  feasible with ZERO slack — which is the point: the design must protect
+  the 2.5-min drive number (clustering) and the capacity boundary
+  (admission), because any degradation breaks it.
+
+  Why greedy fails (T2, g1): the pilot measured it. 12 min/package
+  yields 1,600/day — the strategy, not the fleet, is the bottleneck. The
+  slot is decided by subtraction of two stated numbers.
+
+  Capacity honesty (g4, g5, R3): at zero slack, accepting order 2,401
+  breaks promises already made. The promise engine must consume a
+  capacity model (per-zone, per-departure) and stop promising — admission
+  control at the order boundary, degrading to next-window promises. This
+  is the operability half of "no fires": the fire here is silent
+  overcommitment.
+
+  Parsimony (g7, T3): the system is a batcher, a geospatial clusterer, a
+  capacity ledger, and an admission gate. Continuous global
+  re-optimization, realtime tracking meshes, and event-sourced order
+  logs add nothing the 2-hour cadence needs.

@@ -14,12 +14,12 @@ problem_statement: |
   150 contacts whose availability status (online/away/offline) can appear in
   their sidebar, and a contact's status transition should be visible within
   10 seconds — when the viewer actually has that sidebar or conversation open.
-  On average, any given user's status is being actively displayed by about 3
+  On average, any given user's status is being actively displayed by about 6
   other users at any moment.
 
   A large share of clients are mobile. Measured behavior: a mobile client's
   connection flaps (drop + reconnect) about 30 times per hour on average, and
-  most drops reconnect within 20 seconds.
+  measured traces show 80% of drops reconnect within 8 seconds.
 
   Message traffic peaks at 20,000 messages/second, delivered to small
   conversations (avg 4 recipients). Messages must not be lost once accepted,
@@ -39,7 +39,7 @@ context: |
 constraints:
   - id: C1
     type: scale
-    value: "2M concurrent users; 150 avg contacts; a user's status actively viewed by ~3 others at any moment; mobile flap rate ~30/hour/user, most reconnect within 20s"
+    value: "2M concurrent users; 150 avg contacts; a user's status actively viewed by ~6 others at any moment; mobile flap rate ~30 drop+reconnect pairs/hour/user, 80% reconnect within 8s"
   - id: C2
     type: throughput
     value: "delivery fleet budget: <= 200,000 downstream notifications/second total at peak"
@@ -136,15 +136,15 @@ traps:
   - id: T1
     description: Broadcast every status transition to all 150 contacts ("that's what the contact list is for").
     violated_constraint_id: C2
-    why_attractive: It is the obvious reading of the requirement and what small-scale chat tutorials do. But 2M users x 30 flaps/hour = ~16,700 transitions/second, and x150 contacts that is ~2.5M notifications/second — 12x the entire delivery budget before a single message is sent.
+    why_attractive: It is the obvious reading of the requirement and what small-scale chat tutorials do. But each of the 30 hourly flaps has a drop and reconnect, so 2M users produce ~33,300 transitions/second; x150 contacts is ~5M notifications/second — 25x the entire delivery budget before a single message is sent.
   - id: T2
     description: Broadcast each connect/disconnect immediately as it happens.
     violated_constraint_id: C1
-    why_attractive: Immediate feels more correct than delayed, and the 10s freshness bound seems to demand promptness. But most mobile drops reconnect within 20 seconds; a short grace window inside the 10s-visible bound for GOING-offline collapses the flap pair into zero notifications, cutting presence load roughly in half.
+    why_attractive: Immediate feels more correct than delayed, and the 10s freshness bound seems to demand promptness. But 80% of drops reconnect within 8 seconds; an 8-second grace window still honors the 10-second bound and collapses those drop/reconnect pairs into zero notifications. Without it, active-viewer fan-out plus messages exceeds the fleet budget.
   - id: T3
     description: Persist every presence transition durably "so state survives restarts".
     violated_constraint_id: C1
-    why_attractive: Durable state sounds strictly safer. But presence is explicitly reconstructable from live connections; durably writing ~16,700 ephemeral transitions/second buys nothing and creates a write-load problem the requirements never asked for.
+    why_attractive: Durable state sounds strictly safer. But presence is explicitly reconstructable from live connections; durably writing ~33,300 ephemeral transitions/second buys nothing and creates a write-load problem the requirements never asked for.
 
 twist:
   description: >
@@ -155,23 +155,26 @@ twist:
     The canonical "design WhatsApp/Slack" answer centers message queues,
     delivery receipts, and storage sharding, treating presence as a trivial
     broadcast. Here that recitation fails g1-g4 and g8: presence fan-out at
-    2.5M notifications/second is 12x the stated budget, and only
+    roughly 5M notifications/second is 25x the stated budget, and only
     viewer-subscription (interest management) plus flap debouncing bring it
     inside.
   twist_gold_refs: [g1, g2, g3, g4]
 
 gold_rationale: |
-  Presence arithmetic (g1-g4, T1, T2): transitions = 2M users x 30/hour /
-  3600 ~= 16,700/second. Naive fan-out x150 contacts ~= 2.5M
-  notifications/second vs a 200K/second total budget (C2) — over by 12x, so
+  Presence arithmetic (g1-g4, T1, T2): each flap has two transitions, so
+  transitions = 2M users x 30/hour x 2 / 3600 ~= 33,300/second. Naive
+  fan-out x150 contacts ~= 5M notifications/second vs a 200K/second total
+  budget (C2) — over by 25x, so
   broadcast-to-all-contacts is not a style choice but an arithmetic violation.
-  The stated viewing fact (~3 active viewers per user, C1) is the lever:
-  fanning out only to subscribed active viewers gives 16,700 x 3 ~= 50K/s.
-  Debouncing with a grace window shorter than the 10s visibility bound (C3)
-  absorbs the dominant flap pattern (drop + reconnect within 20s — the
-  offline+online pair collapses for any viewer who never saw the gap),
-  roughly halving even that. Combined: ~25-50K/s presence + message fan-out
-  (20K msgs/s x ~3 online recipients ~= 60K/s) lands comfortably inside 200K/s.
+  The stated viewing fact (~6 active viewers per user, C1) is the first lever:
+  fanning out only to subscribed active viewers gives 33,300 x 6 ~= 200K/s,
+  which already consumes the fleet budget before message delivery. An 8-second
+  offline grace still meets the 10-second visibility bound (C3) and suppresses
+  the measured 80% of flap pairs that reconnect inside it. The remaining 20%
+  produce 16,700 x 0.20 x 2 x 6 ~= 40K/s presence notifications. Adding
+  message fan-out (20K msgs/s x ~3 online recipients ~= 60K/s) gives ~100K/s,
+  inside 200K/s. Interest management alone gives ~260K/s combined and fails;
+  debouncing is therefore independently entailed.
 
   Message path (g5, C4): per-conversation ordering satisfies the stated
   consistency requirement; global total order across 20K msgs/s adds

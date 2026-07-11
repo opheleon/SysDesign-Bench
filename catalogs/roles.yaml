@@ -2,7 +2,7 @@
 # A design spec assigns each chosen component exactly one role per entry.
 # The same component may appear under multiple roles (e.g. redis-7 as serving-cache
 # and session-store) — grading checks (component, role) pairs.
-version: "0.2.0"
+version: "0.3.0"
 roles:
   - id: system-of-record
     name: System of record

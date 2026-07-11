@@ -2,7 +2,7 @@
 # One global catalog shown verbatim to the model in every scenario — per-scenario
 # hint leakage is impossible because the menu never changes. Additions are versioned
 # and additive, and must cite the documented property that makes them checkable.
-version: "0.2.0"
+version: "0.3.0"
 patterns:
   # ============ storage-engine ============
   - id: lsm-tree
@@ -115,6 +115,18 @@ patterns:
     name: Crypto-shredding
     category: data
     description: Per-subject encryption keys; deleting the key renders the subject's data in immutable storage unrecoverable, satisfying erasure without rewriting segments.
+  - id: consistent-cut-snapshot
+    name: Consistent-cut snapshot
+    category: data
+    description: A logical snapshot whose per-partition positions include all causally prior work and account for in-flight messages, so the combined state could have existed at one instant.
+  - id: bitemporal-model
+    name: Bitemporal data model
+    category: data
+    description: Records both valid time and transaction/knowledge time, supporting queries for what was effective and what the system knew at a historical instant.
+  - id: point-in-time-join
+    name: Point-in-time join
+    category: data
+    description: Joins each fact only to values available by its event or label cutoff, preventing future information from leaking into historical results.
 
   # ============ migration ============
   - id: expand-contract
@@ -383,6 +395,30 @@ patterns:
     name: Checkpoint and resume
     category: reliability
     description: Long-running work persists progress markers so interrupted jobs continue from the last checkpoint instead of restarting.
+  - id: fencing-tokens
+    name: Fencing tokens
+    category: reliability
+    description: Monotonically increasing ownership epochs accompany writes; sinks reject epochs older than the highest accepted, blocking a paused former lease holder.
+  - id: version-guarded-writes
+    name: Version-guarded writes
+    category: reliability
+    description: A mutation is accepted only when its entity or configuration version precondition is current, rejecting stale writers, backfills, and invalidations.
+  - id: failure-domain-aware-placement
+    name: Failure-domain-aware placement
+    category: reliability
+    description: Replicas or parity fragments are placed across independent correlated-failure domains so the stated combined outage leaves a quorum or reconstruction set.
+
+  # ============ observability ============
+  - id: tail-based-sampling
+    name: Tail-based trace sampling
+    category: observability
+    description: A trace is retained or discarded only after its completed outcome and latency are known, enabling deterministic capture of rare failures within a storage budget.
+
+  # ============ scheduling ============
+  - id: gang-scheduling
+    name: Gang scheduling
+    category: scheduling
+    description: All resources required by a distributed job are reserved and started as one unit, avoiding partial allocation and deadlock for tightly coupled workers.
 
   # ============ embedded ============
   - id: ab-partition-update

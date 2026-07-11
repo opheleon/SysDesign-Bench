@@ -25,6 +25,16 @@ problem_statement: |
   - Legal: a tenant can invoke data erasure; ALL of that tenant's data must
     be verifiably unreadable within 30 days of the request, including data
     inside the 13-month aggregate window. Erasure requests arrive weekly.
+    The regulator explicitly accepts audited destruction of per-tenant
+    envelope-encryption keys as verified erasure.
+
+  The fixed hot-tier hardware budget sustains 250,000 random 4 KB writes/s or
+  2 GB/s of sequential writes. Prototype measurements for this workload show
+  update-in-place B-tree batching still needs at least one random page write
+  per eight points, while an LSM configuration has <=8x total write
+  amplification. The 13-month aggregate set is 120 TB logical; the cold-tier
+  storage cap is 30 TB. Measured compression is 6:1 for columnar segments and
+  at best 2:1 for the row-oriented alternative.
 
   Design the engine's write path, historical storage layout, and the erasure
   mechanism.
@@ -32,12 +42,16 @@ problem_statement: |
 context: |
   Tenants are commingled in storage for cost reasons (dedicated
   storage-per-tenant was rejected: median tenant is tiny). Object storage
-  holds cold segments. Compaction runs continuously.
+  holds cold segments partitioned by time and metric family, so a typical
+  long-lived tenant appears in nearly every segment. Compaction runs
+  continuously. The monthly erasure-rewrite allowance is 5 TB of object-store
+  reads plus writes; measurements show one typical tenant erasure would touch
+  roughly 20 TB of compressed shared segments.
 
 constraints:
   - id: C1
     type: throughput
-    value: "5M points/second sustained ingest (~7 TB/day raw); points arrive roughly time-ordered per series"
+    value: "5M points/second sustained ingest (~7 TB/day raw); fixed hot tier allows 250K random 4KB writes/s or 2GB/s sequential; measured B-tree >=1 random page write/8 points and LSM <=8x sequential write amplification"
   - id: C2
     type: latency
     value: "recent per-series range queries p99 <= 200 ms; historical/aggregate queries tolerate seconds"
@@ -45,8 +59,8 @@ constraints:
     type: compliance
     value: "per-tenant erasure verifiably complete within 30 days of request, including inside the 13-month aggregate retention window; requests arrive weekly"
   - id: C4
-    type: scale
-    value: "~2.5 PB/year; tenants commingled in shared immutable segments; rewriting cold storage is priced at object-store read+write of every touched segment"
+    type: budget
+    value: "13-month aggregates are 120TB logical with a 30TB cold-storage cap; columnar compression measured 6:1 vs row 2:1; erasure rewrite allowance <=5TB/month while one typical tenant touches ~20TB of shared segments"
 
 requirements:
   - id: R1
@@ -138,16 +152,15 @@ traps:
   - id: T1
     description: Update-in-place B-tree storage for the write path.
     violated_constraint_id: C1
-    why_attractive: B-trees are the default mental model of "a database" and give great point reads. But 5M inserts/second against update-in-place pages means random I/O and page splits at a rate no disk subsystem absorbs; sequential memtable-flush-merge (LSM) is what time-ordered append workloads are for.
+    why_attractive: B-trees are the default mental model of "a database" and give great point reads. But the measured one-page-per-eight-points floor is 625K random writes/s against the fixed 250K ceiling. The LSM path writes 80MB/s raw x8 amplification = 640MB/s sequential, safely below 2GB/s.
   - id: T2
     description: Execute erasure by rewriting every segment containing the tenant's data.
     violated_constraint_id: C4
     why_attractive: >
       It is the direct, honest reading of "make the data unreadable" and it
       demonstrably works. But tenants are commingled: a weekly erasure request
-      touches segments across 13 months of PB-scale storage — a near-full
-      rewrite of the cold tier, weekly, priced at object-store read+write of
-      everything touched.
+      touches about 20 TB of shared segments, four times the entire monthly
+      5 TB rewrite allowance for a single request — and requests arrive weekly.
   - id: T3
     description: Defer erasure until normal retention expiry ("it all ages out anyway").
     violated_constraint_id: C3
@@ -162,35 +175,36 @@ twist:
     The TSDB canon (immutable columnar segments, "deletes are just retention
     expiry" — the documented posture of mainstream time-series engines) fails
     g5/g6/g10: with weekly erasure requests, a 13-month window, and
-    commingled PB-scale segments, neither segment rewriting nor
-    wait-for-retention survives the math. Per-tenant encryption keys with
-    key destruction (crypto-shredding) is the only mechanism satisfying C3
-    without repricing C4.
+    commingled segments, neither segment rewriting nor wait-for-retention
+    survives the explicit caps. Per-tenant encryption keys with audited key
+    destruction (crypto-shredding) is the only listed mechanism satisfying C3
+    within C4, and the regulator explicitly accepts it.
   twist_gold_refs: [g5, g6, g10]
 
 gold_rationale: |
-  Write path (g1, g2, T1): 5M points/second of roughly time-ordered appends
-  is the canonical LSM workload — sequential memtable flushes and merges
-  (compaction, g9) turn the ingest into sequential I/O. Update-in-place
-  B-tree pages at this rate mean random writes and splits several orders of
-  magnitude beyond what the I/O budget supports; the slot is entailed, not
-  stylistic.
+  Write path (g1, g2, T1): 5M x 16 bytes = 80 MB/s raw. The measured B-tree
+  floor is 5M/8 = 625K random page writes/s, 2.5x the 250K fixed-hardware
+  ceiling. LSM sequential traffic is at most 80 MB/s x8 = 640 MB/s, only 32%
+  of the 2 GB/s sequential budget. Compaction (g9) is required to bound the
+  resulting immutable runs. The slot is pinned by measured resource bounds,
+  not by a generic preference for LSM trees.
 
   Cold layout and rollups (g3, g4, g7, g8, g11): dashboards hit recent raw
   data (row-ish recent tier is fine in the memtable/hot tier), while
-  13-month queries hit aggregates — downsampling (rollups) cuts the
-  13-month tier from ~2.5 PB raw-per-year to low tens of TB, and columnar
-  immutable segments give the compression and scan profile that makes R3
-  affordable. TTL expiry implements both retention edges (30-day raw,
-  13-month aggregates).
+  13-month queries hit aggregates. The aggregate set is 120 TB logical:
+  measured 6:1 columnar compression yields 20 TB and fits the 30 TB cap;
+  row-oriented 2:1 yields 60 TB and fails it by 2x. Rollups and columnar
+  segments therefore jointly make R3 affordable. TTL expiry implements both
+  retention edges (30-day raw, 13-month aggregates).
 
   Erasure (g5, g6, g10, T2, T3): the three mechanisms are exhaustive.
-  Rewriting: weekly requests x commingled tenants x 13 months of segments =
-  repeated near-full cold-tier rewrites (C4 prices this out). Deferral:
+  Rewriting one typical tenant touches ~20 TB, already 4x the entire 5 TB
+  monthly rewrite allowance; weekly requests widen the gap to ~16x. Deferral:
   13 months > 30 days (C3 rules this out, flatly). Crypto-shredding:
   encrypt each tenant's data under per-tenant keys at write time (cheap,
   symmetric, per-segment-per-tenant data keys); erasure = destroy the keys,
   making data in every immutable segment — including inside aggregates keyed
   the same way — verifiably unreadable within minutes, at zero rewrite cost.
-  The immutability canon survives BECAUSE the erasure moves to the key
-  layer; this is the compound twist resolved.
+  The prompt explicitly states regulator acceptance, so this is compliant by
+  construction rather than an assumed legal interpretation. The immutability
+  canon survives because erasure moves to the key layer.

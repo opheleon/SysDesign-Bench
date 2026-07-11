@@ -1,0 +1,193 @@
+# A durability repair that can manufacture a larger outage: rebuilding at line
+# rate steals foreground capacity, causes retries, and makes saturated-but-live
+# nodes fail heartbeat tests. The exact deadline math requires a rate floor as
+# well as a latency-sensitive ceiling.
+instance_id: erasure-repair-controller-001
+domain: distributed-storage
+difficulty: hard
+version: "0.3.0"
+split: public
+
+problem_statement: |
+  A storage service uses 8+3 Reed-Solomon stripes across 12 racks, with four
+  storage nodes per rack. One node holding 12 TB of shard data has failed.
+  Design the stripe placement, rebuild controller, and overload behavior.
+
+  The measured rebuild cost is nine network bytes per byte reconstructed
+  (eight source reads plus one replacement write). Capacity planning requires
+  20% above that measured byte count for framing, retransmission, and skew. The
+  failed protection must be restored within 24 hours.
+
+  Foreground reads have a hard p99 <= 25 ms. Tests show that, when foreground
+  traffic has strict priority and repair draws no more than 0.25 Gb/s from
+  each of the 48 surviving source nodes, p99 stays below 22 ms. A line-rate
+  rebuild drives p99 above 80 ms. Clients time out at 30 ms and may otherwise
+  make three attempts. Storage heartbeats share those NICs and are sampled
+  every two seconds.
+
+  A healthy node must not be evicted merely because recovery traffic delayed
+  three heartbeats. A real rack loss must remain survivable during normal
+  operation; all four nodes in a rack share power and top-of-rack networking.
+
+context: |
+  Repair work is divisible into independently checkpointed stripe ranges, so
+  its rate can be changed without restarting the rebuild. The controller sees
+  remaining bytes, time to deadline, foreground p99, NIC queue depth, retry
+  rate, and out-of-band rack-power health. The 48 surviving nodes share repair
+  source work uniformly when shards were placed in distinct rack domains.
+
+constraints:
+  - id: C1
+    type: durability
+    value: "reconstruct 12 TB under the measured 9x network cost plus 20% planning margin within 24 hours"
+  - id: C2
+    type: latency
+    value: "foreground read p99 <= 25 ms during repair; tests validate <= 0.25 Gb/s repair draw per surviving source when foreground is prioritized"
+  - id: C3
+    type: availability
+    value: "repair-induced latency must not create unbounded client retry amplification or evict saturated-but-live nodes after three delayed heartbeats"
+  - id: C4
+    type: topology
+    value: "8+3 stripes must survive loss of any one four-node rack"
+
+requirements:
+  - id: R1
+    text: Stripe placement keeps a single rack failure within the code's three-shard loss tolerance.
+  - id: R2
+    text: Repair finishes within 24 hours while foreground requests retain priority and their p99 SLO.
+  - id: R3
+    text: Excess request load is rejected or delayed without multiplying each request into three attempts.
+  - id: R4
+    text: Failure detection distinguishes resource saturation from an actual node or rack failure before eviction.
+
+flows:
+  - id: stripe_placement
+    description: Placement of the eleven shards in each erasure-coded stripe.
+    decision_slots:
+      domain_rule: [capacity-only-any-node, at-most-one-shard-per-rack]
+  - id: repair_bandwidth
+    description: Network scheduling for the rebuild as work and deadline change.
+    decision_slots:
+      policy: [unbounded-work-conserving, fixed-four-point-eight-gbps, twelve-gbps-deadline-floor-with-foreground-priority-and-adaptive-burst]
+  - id: overload_containment
+    description: Behavior when repair pressure delays requests and heartbeats.
+    decision_slots:
+      failure_detection: [evict-after-three-heartbeat-misses, multi-signal-grace-during-saturation]
+      retry_policy: [unbounded-thirty-ms-client-retries, admission-controlled-retry-after-with-circuit-breaking]
+
+relaxation_options: []
+
+expected_mode: design
+
+gold:
+  - id: g1
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: stripe_placement
+    slot: domain_rule
+    acceptable: [at-most-one-shard-per-rack]
+  - id: g2
+    dimension: tradeoff_selection
+    check: slot_match
+    flow: repair_bandwidth
+    slot: policy
+    acceptable: [twelve-gbps-deadline-floor-with-foreground-priority-and-adaptive-burst]
+  - id: g3
+    dimension: operability
+    check: slot_match
+    flow: overload_containment
+    slot: failure_detection
+    acceptable: [multi-signal-grace-during-saturation]
+  - id: g4
+    dimension: operability
+    check: slot_match
+    flow: overload_containment
+    slot: retry_policy
+    acceptable: [admission-controlled-retry-after-with-circuit-breaking]
+  - id: g5
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R1
+    acceptable: [failure-domain-aware-placement]
+  - id: g6
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R2
+    acceptable: [priority-queues]
+  - id: g7
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R3
+    acceptable: [admission-control]
+  - id: g8
+    dimension: requirements_coverage
+    check: coverage
+    requirement: R4
+    acceptable: [health-checks-heartbeats]
+  - id: g9
+    dimension: parsimony
+    check: parsimony
+    max_patterns: 8
+
+traps:
+  - id: T1
+    description: Rebuild at every source and destination's available line rate so redundancy returns as quickly as possible.
+    violated_constraint_id: C2
+    why_attractive: Fastest-possible repair minimizes the window with one missing shard and is the usual durability instinct. Here the measured result is p99 above 80 ms, past the 30 ms client timeout and far past the 25 ms SLO; retries then add load precisely when the NICs are saturated. A controller needs a deadline-derived floor but may burst only through observed spare capacity.
+  - id: T2
+    description: Place shards wherever node-level free space is greatest, since 8+3 coding tolerates three failures.
+    violated_constraint_id: C4
+    why_attractive: Capacity-only balancing is simple and treats all node failures as independent. Four nodes share each rack's power and network, however; placing four shards of one stripe in a rack lets one rack loss erase four shards, exceeding the three parity shards. One shard per rack bounds that correlated loss at one.
+  - id: T3
+    description: Let clients perform all three 30 ms attempts and evict a node after its third missed two-second heartbeat during repair.
+    violated_constraint_id: C3
+    why_attractive: Retries and quick heartbeat eviction normally hide isolated failures. Under the stated shared-NIC saturation they turn one slow request into as many as three and interpret queueing as death, adding repairs for healthy nodes. Admission control/circuit breaking and multi-signal failure evidence stop that positive-feedback loop.
+
+twist:
+  description: >
+    The recovery operation is itself the failure stimulus: repair bandwidth
+    increases latency, latency creates retries and missed heartbeats, and false
+    evictions create still more repair work. Both a minimum and a maximum rate
+    matter.
+  invalidated_canonical: >
+    The canonical "restore redundancy as fast as possible" response fails g2,
+    g3, and g4. The 24-hour arithmetic fixes a 12 Gb/s floor, but foreground
+    priority, adaptive burst throttling, admission control, and multi-signal
+    health evidence are required to prevent the rebuild from cascading into a
+    cluster outage. Node-count placement without failure domains also fails g1.
+  twist_gold_refs: [g1, g2, g3, g4]
+
+gold_rationale: |
+  Placement (g1, g5, T2): an 8+3 stripe has only three parity shards. A rack
+  contains four nodes, so capacity-only node placement may put four shards in
+  one correlated domain; one rack failure then loses 4 > 3 and the stripe is
+  unrecoverable. There are 12 racks for 11 shards, so at most one shard per
+  rack is both feasible and sufficient: any single rack loss removes at most
+  one shard. This is exactly failure-domain-aware placement, not merely even
+  node utilization.
+
+  Rate proof (g2, g6, T1): reconstructing 12 TB moves 12 * 9 = 108 TB. The
+  required 20% margin makes the planned total 129.6 TB. Over 24 hours the
+  minimum average network rate is
+
+      129.6 TB * 8 / 86,400 s = 12 Gb/s.
+
+  With uniform repair sources that is 12 / 48 = 0.25 Gb/s per surviving node,
+  exactly the tested limit that retains p99 below 22 ms when foreground work
+  has priority. The 4.8 Gb/s option needs 129.6 TB * 8 / 4.8 Gb/s = 216,000 s
+  = 60 hours and violates C1. Unbounded line-rate repair violates C2. Therefore
+  the controller must continuously recompute remaining-work / remaining-time
+  as its nonzero floor, give foreground work strict priority, and use latency
+  and queue depth to throttle only optional burst above that floor. If the
+  floor itself ever threatens p99, that is an explicit durability/SLO alarm,
+  not permission to silently miss the deadline.
+
+  Cascade containment (g3, g4, g7, g8, T3): at p99 > 30 ms, three automatic
+  attempts can triple offered client work; heartbeat packets contend on the
+  same queues, so three misses are correlated evidence of saturation rather
+  than independent evidence of node death. Admission control with Retry-After
+  and circuit breaking bounds attempts. Failure decisions combine heartbeat,
+  foreground and NIC saturation signals with out-of-band rack-power evidence
+  and apply a recovery grace while the node still makes progress. That avoids
+  launching replacement repairs for live nodes without masking an actual rack
+  loss.
