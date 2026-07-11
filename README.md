@@ -132,11 +132,20 @@ models and are under review per the all-fail-indicts-the-item rule (11 are
 parsimony caps, 2 are coverage acceptable-sets). v0.1/v0.2 pilot tables are
 retained in git history.
 
-## Roadmap: calibrating to 50%
+## Roadmap: the bar for 1.0
 
-The benchmark's difficulty target is that **the strongest available model scores
-~50% Overall**. v0.3 sits at 92%, so v0.4's agenda is difficulty, earned
-through harder entailment, never through stricter grading of defensible answers:
+- **200 scenarios** (150 public, 50 held out and refreshed), up from 38/12
+  today, at the same authoring bar throughout.
+- **The strongest model scores ~50% Overall** (v0.3 top score: 92%).
+- **Domain breadth**: security architecture, ML inference serving,
+  mobile/client, networking/edge, batch data platforms, enterprise
+  integration, and more clarify/infeasible scenarios (the sharpest
+  discriminators in every pilot so far).
+- **Statistical rigor**: multi-run variance, independent review of every gold
+  proof, discrimination pilots for new items.
+
+Difficulty is earned through harder entailment, never through stricter
+grading of defensible answers:
 
 - Scale the formal-proof scenario style (fencing races, quorum-safety
   migrations, capability DAGs: the items where frontier models actually drop
